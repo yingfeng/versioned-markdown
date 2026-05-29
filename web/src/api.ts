@@ -47,8 +47,19 @@ export async function createFolder(parentID: string, name: string): Promise<Docs
   })
 }
 
+export async function deleteFiles(fileIDs: string[]): Promise<void> {
+  await api('/files', { method: 'DELETE', body: JSON.stringify({ file_ids: fileIDs }) })
+}
+
+export async function renameFile(fileID: string, newName: string): Promise<void> {
+  await api('/files/move', {
+    method: 'POST',
+    body: JSON.stringify({ file_ids: [fileID], dest_parent_id: '', new_names: { [fileID]: newName } }),
+  })
+}
+
 export async function listFolderCommits(folderID: string, page = 1): Promise<FileCommit[]> {
-  const r = await api<{ data: FileCommit[] }>(`/folders/${folderID}/commits?page=${page}&page_size=50`)
+  const r = await api<{ data: FileCommit[] }>(`/workspaces/${folderID}/commits?page=${page}&page_size=50`)
   return Array.isArray(r) ? r : (r as any).data || []
 }
 
@@ -62,11 +73,11 @@ export async function getCommitFileContent(commitID: string, fileID: string): Pr
 }
 
 export async function createCommit(
-  kbID: string,
+  folderID: string,
   message: string,
   files: { file_id: string; file_name: string; operation: string; content: string }[]
 ): Promise<FileCommit> {
-  return api<FileCommit>(`/datasets/${kbID}/commits`, {
+  return api<FileCommit>(`/workspaces/${folderID}/commits`, {
     method: 'POST',
     body: JSON.stringify({ message, files }),
   })

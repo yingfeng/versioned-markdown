@@ -22,18 +22,18 @@ func (d *CommitDAO) GetCommitByID(id string) (*entity.FileCommit, error) {
 	return &c, err
 }
 
-func (d *CommitDAO) ListCommits(kbID string, page, pageSize int) ([]entity.FileCommit, int64, error) {
+func (d *CommitDAO) ListCommits(folderID string, page, pageSize int) ([]entity.FileCommit, int64, error) {
 	var commits []entity.FileCommit
 	var total int64
-	query := DB.Where("kb_id = ?", kbID)
+	query := DB.Where("folder_id = ?", folderID)
 	query.Model(&entity.FileCommit{}).Count(&total)
 	err := query.Offset((page - 1) * pageSize).Limit(pageSize).Order("create_time DESC").Find(&commits).Error
 	return commits, total, err
 }
 
-func (d *CommitDAO) GetLatestCommit(kbID string) (*entity.FileCommit, error) {
+func (d *CommitDAO) GetLatestCommit(folderID string) (*entity.FileCommit, error) {
 	var c entity.FileCommit
-	err := DB.Where("kb_id = ?", kbID).Order("create_time DESC").First(&c).Error
+	err := DB.Where("folder_id = ?", folderID).Order("create_time DESC").First(&c).Error
 	return &c, err
 }
 

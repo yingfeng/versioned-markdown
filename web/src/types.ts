@@ -2,7 +2,7 @@
 
 export interface FileCommit {
   id: string
-  kb_id: string
+  folder_id: string
   parent_id?: string
   message: string
   author_id: string

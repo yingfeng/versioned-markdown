@@ -1,9 +1,9 @@
 package entity
 
-// FileCommit represents a commit — a batch of file changes within a KB.
+// FileCommit represents a commit — a batch of file changes within a workspace folder.
 type FileCommit struct {
 	ID        string  `gorm:"column:id;primaryKey;size:32" json:"id"`
-	KbID      string  `gorm:"column:kb_id;size:32;not null;index" json:"kb_id"`
+	FolderID  string  `gorm:"column:folder_id;size:32;not null;index" json:"folder_id"`
 	ParentID  string  `gorm:"column:parent_id;size:32;index" json:"parent_id,omitempty"`
 	Message   string  `gorm:"column:message;size:512" json:"message"`
 	AuthorID  string  `gorm:"column:author_id;size:32;not null;index" json:"author_id"`

@@ -15,9 +15,9 @@ func NewCommitHandler(fileSvc *service.FileService) *CommitHandler {
 	return &CommitHandler{fileSvc: fileSvc}
 }
 
-// CreateCommit POST /api/v1/datasets/:dataset_id/commits
+// CreateCommit POST /api/v1/workspaces/:folder_id/commits
 func (h *CommitHandler) CreateCommit(c *gin.Context) {
-	kbID := c.Param("dataset_id")
+	folderID := c.Param("folder_id")
 	authorID := c.GetString("user_id")
 
 	var req struct {
@@ -33,7 +33,7 @@ func (h *CommitHandler) CreateCommit(c *gin.Context) {
 		return
 	}
 
-	commit, err := h.fileSvc.CreateCommit(kbID, authorID, req.Message, req.Files)
+	commit, err := h.fileSvc.CreateCommit(folderID, authorID, req.Message, req.Files)
 	if err != nil {
 		ginAbort(c, 500, "create commit: "+err.Error())
 		return
@@ -41,13 +41,13 @@ func (h *CommitHandler) CreateCommit(c *gin.Context) {
 	ginJSON(c, gin.H{"data": commit})
 }
 
-// ListCommits GET /api/v1/datasets/:dataset_id/commits
+// ListCommits GET /api/v1/workspaces/:folder_id/commits
 func (h *CommitHandler) ListCommits(c *gin.Context) {
-	kbID := c.Param("dataset_id")
+	folderID := c.Param("folder_id")
 	page := parseInt(c.DefaultQuery("page", "1"), 1)
 	pageSize := parseInt(c.DefaultQuery("page_size", "20"), 20)
 
-	commits, total, err := h.fileSvc.ListCommits(kbID, page, pageSize)
+	commits, total, err := h.fileSvc.ListCommits(folderID, page, pageSize)
 	if err != nil {
 		ginAbort(c, 500, "list commits: "+err.Error())
 		return
@@ -110,19 +110,14 @@ func (h *CommitHandler) DiffCommits(c *gin.Context) {
 	ginJSON(c, gin.H{"data": diff})
 }
 
-// ListFolderCommits GET /api/v1/folders/:folder_id/commits
+// ListFolderCommits is now handled by ListCommits via /workspaces/:folder_id/commits
+// kept for backward compatibility
 func (h *CommitHandler) ListFolderCommits(c *gin.Context) {
 	folderID := c.Param("id")
+	h.ListCommits(c) // reuse new handler, but param name mismatch - inline instead
 	page := parseInt(c.DefaultQuery("page", "1"), 1)
 	pageSize := parseInt(c.DefaultQuery("page_size", "20"), 20)
-
-	kbID, err := h.fileSvc.GetDatasetIDByFileID(folderID)
-	if err != nil {
-		ginAbort(c, 404, "folder not associated with any dataset")
-		return
-	}
-
-	commits, total, err := h.fileSvc.ListCommits(kbID, page, pageSize)
+	commits, total, err := h.fileSvc.ListCommits(folderID, page, pageSize)
 	if err != nil {
 		ginAbort(c, 500, "list commits: "+err.Error())
 		return

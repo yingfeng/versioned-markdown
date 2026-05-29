@@ -56,6 +56,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Robo
 .nav-icon { flex-shrink: 0; font-size: 14px; }
 .nav-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .nav-arrow { color: var(--fg3); font-size: 10px; }
+.nav-item-content { display: flex; align-items: center; gap: 8px; flex: 1; cursor: pointer; }
+.delete-btn {
+  display: none; font-size: 11px; color: var(--fg3); cursor: pointer;
+  padding: 2px 4px; border-radius: 3px; flex-shrink: 0;
+}
+.nav-item:hover .delete-btn { display: inline-block; }
+.delete-btn:hover { color: var(--danger); background: rgba(239,83,80,0.1); }
+
+.rename-input {
+  width: 100%; padding: 4px 8px; border-radius: 4px;
+  border: 1px solid var(--accent); background: var(--bg); color: var(--fg);
+  font-size: 13px; outline: none; font-family: inherit;
+}
 
 .divider { height: 1px; background: var(--border); margin: 8px 16px; }
 .section-hdr {

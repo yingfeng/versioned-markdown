@@ -165,8 +165,10 @@ func (s *FileService) MoveFiles(srcFileIDs []string, destParentID string, newNam
 		}
 
 		updates := map[string]interface{}{
-			"parent_id": destParentID,
-			"name":      newName,
+			"name": newName,
+		}
+		if destParentID != "" {
+			updates["parent_id"] = destParentID
 		}
 		if err := s.fileDAO.UpdateByID(srcID, updates); err != nil {
 			return fmt.Errorf("move file %s: %w", srcID, err)
@@ -191,9 +193,9 @@ func (s *FileService) GetFileContent(fileID string) (*entity.File, []byte, error
 	return f, data, nil
 }
 
-// CreateCommit creates a new commit with a batch of files for a KB.
-func (s *FileService) CreateCommit(kbID, authorID, message string, fileChanges []CommitFileInput) (*entity.FileCommit, error) {
-	prev, _ := s.commitDAO.GetLatestCommit(kbID)
+// CreateCommit creates a new commit for a workspace folder.
+func (s *FileService) CreateCommit(folderID, authorID, message string, fileChanges []CommitFileInput) (*entity.FileCommit, error) {
+	prev, _ := s.commitDAO.GetLatestCommit(folderID)
 	parentID := ""
 	if prev != nil {
 		parentID = prev.ID
@@ -201,7 +203,7 @@ func (s *FileService) CreateCommit(kbID, authorID, message string, fileChanges [
 
 	commit := &entity.FileCommit{
 		ID:        entity.NewID(),
-		KbID:      kbID,
+		FolderID:  folderID,
 		ParentID:  parentID,
 		Message:   message,
 		AuthorID:  authorID,
@@ -230,13 +232,17 @@ func (s *FileService) CreateCommit(kbID, authorID, message string, fileChanges [
 				if f.Location != nil {
 					item.OldLocation = f.Location
 				}
+				// Mark file as deleted
+				_ = s.fileDAO.UpdateByID(change.FileID, map[string]interface{}{
+					"status": "0",
+				})
 			}
 
 		case entity.CommitOpAdd, entity.CommitOpModify:
-			if change.Content == nil {
+			if change.Content == "" {
 				continue
 			}
-			hash := sha256Hex(change.Content)
+			hash := sha256Hex([]byte(change.Content))
 			contentHash := hash
 
 			if change.Operation == entity.CommitOpAdd {
@@ -250,13 +256,11 @@ func (s *FileService) CreateCommit(kbID, authorID, message string, fileChanges [
 				}
 				if f != nil {
 					item.OldLocation = f.Location
-					item.OldHash = f.Location
 				}
 			} else {
 				f, err := s.fileDAO.GetByID(change.FileID)
 				if err == nil {
 					item.OldLocation = f.Location
-					item.OldHash = f.Location
 					if f.Location != nil {
 						item.OldLocation = f.Location
 					}
@@ -264,7 +268,7 @@ func (s *FileService) CreateCommit(kbID, authorID, message string, fileChanges [
 			}
 
 			objKey := fmt.Sprintf(".objects/%s", contentHash)
-			if err := s.storageImpl.Put(kbID, objKey, change.Content); err != nil {
+			if err := s.storageImpl.Put(folderID, objKey, []byte(change.Content)); err != nil {
 				return nil, fmt.Errorf("store object %s: %w", contentHash, err)
 			}
 
@@ -291,8 +295,17 @@ func (s *FileService) CreateCommit(kbID, authorID, message string, fileChanges [
 		}
 	}
 
-	// Build and store tree state snapshot
-	commit.TreeState = s.generateTreeStateJSON(kbID, commitNewHashes)
+	// Build and store tree state snapshot (workspace-scoped)
+	treeRoot := s.buildTreeState(folderID, commitNewHashes)
+	if treeRoot != nil {
+		treeJSON, _ := json.Marshal(treeRoot)
+		if treeJSON != nil {
+			treeStr := string(treeJSON)
+			commit.TreeState = &treeStr
+			// Persist tree_state to DB
+			_ = dao.DB.Model(&entity.FileCommit{}).Where("id = ?", commit.ID).Update("tree_state", treeStr)
+		}
+	}
 
 	return commit, nil
 }
@@ -319,9 +332,9 @@ func (s *FileService) generateTreeStateJSON(kbID string, newHashes map[string]st
 	return &treeStr
 }
 
-// ListCommits lists commit history for a KB.
-func (s *FileService) ListCommits(kbID string, page, pageSize int) ([]entity.FileCommit, int64, error) {
-	return s.commitDAO.ListCommits(kbID, page, pageSize)
+// ListCommits lists commit history for a workspace folder.
+func (s *FileService) ListCommits(folderID string, page, pageSize int) ([]entity.FileCommit, int64, error) {
+	return s.commitDAO.ListCommits(folderID, page, pageSize)
 }
 
 // GetCommit returns a single commit's details.
@@ -421,7 +434,7 @@ type CommitFileInput struct {
 	FileID      string           `json:"file_id"`
 	FileName    string           `json:"file_name"`
 	Operation   entity.FileCommitOp `json:"operation"`
-	Content     []byte           `json:"-"`
+	Content     string           `json:"content"`
 	ContentHash string           `json:"content_hash"`
 	OldName     string           `json:"old_name,omitempty"`
 	NewName     string           `json:"new_name,omitempty"`
@@ -483,8 +496,12 @@ func (s *FileService) buildTreeState(folderID string, newHashes map[string]strin
 	}
 	children, _, _ := s.fileDAO.GetByParentID(folderID, 1, 10000, "")
 	for _, child := range children {
-		// Skip self-referencing root folder (parent_id = id in RagFlow schema)
+		// Skip self-referencing root folder
 		if child.ID == folderID {
+			continue
+		}
+		// Skip deleted files (status == "0")
+		if child.Status == "0" {
 			continue
 		}
 		if child.Type == "folder" {
@@ -548,6 +565,11 @@ func (s *FileService) GetCurrentTree(folderID string) (*entity.TreeNode, error) 
 
 // GetCommitFileContent retrieves file content as it existed at a specific commit.
 func (s *FileService) GetCommitFileContent(commitID, fileID string) ([]byte, error) {
+	c, err := s.commitDAO.GetCommitByID(commitID)
+	if err != nil {
+		return nil, fmt.Errorf("commit not found: %w", err)
+	}
+
 	items, err := s.commitDAO.GetItemsByCommitID(commitID)
 	if err != nil {
 		return nil, fmt.Errorf("get commit items: %w", err)
@@ -578,11 +600,7 @@ func (s *FileService) GetCommitFileContent(commitID, fileID string) ([]byte, err
 		targetLocation = f.Location
 	}
 
-	c, err := s.commitDAO.GetCommitByID(commitID)
-	if err != nil {
-		return nil, fmt.Errorf("commit not found: %w", err)
-	}
-	return s.storageImpl.Get(c.KbID, *targetLocation)
+	return s.storageImpl.Get(c.FolderID, *targetLocation)
 }
 
 // GetFileVersionHistory gets all commits that modified a specific file.

@@ -22,6 +22,7 @@ type File struct {
 	Size       int64   `gorm:"column:size;default:0;index" json:"size"`
 	Type       string  `gorm:"column:type;size:32;not null;index" json:"type"`
 	SourceType string  `gorm:"column:source_type;size:128;not null;default:'';index" json:"source_type"`
+	Status     string  `gorm:"column:status;size:1;default:'1';index" json:"status"`
 	BaseModel
 }
 

@@ -55,13 +55,13 @@ func Setup(r *gin.Engine, h *Handlers) {
 	api.GET("/documents/:id", h.Doc.GetDocument)
 	api.DELETE("/documents/:id", h.Doc.DeleteDocument)
 
-	// ===== Commit APIs (Version Control) =====
-	api.POST("/datasets/:dataset_id/commits", h.Commit.CreateCommit)
-	api.GET("/datasets/:dataset_id/commits", h.Commit.ListCommits)
-	api.GET("/datasets/:dataset_id/commits/diff", h.Commit.DiffCommits)
-	api.GET("/datasets/:dataset_id/commits/:commit_id", h.Commit.GetCommit)
-	api.GET("/datasets/:dataset_id/commits/:commit_id/files", h.Commit.ListCommitFiles)
-	api.GET("/datasets/:dataset_id/commits/:commit_id/files/:file_id/content", h.Commit.GetCommitFileContent)
+	// ===== Commit APIs (Version Control, scoped to workspace folder) =====
+	api.POST("/workspaces/:folder_id/commits", h.Commit.CreateCommit)
+	api.GET("/workspaces/:folder_id/commits", h.Commit.ListCommits)
+	api.GET("/workspaces/:folder_id/commits/diff", h.Commit.DiffCommits)
+	api.GET("/workspaces/:folder_id/commits/:commit_id", h.Commit.GetCommit)
+	api.GET("/workspaces/:folder_id/commits/:commit_id/files", h.Commit.ListCommitFiles)
+	api.GET("/workspaces/:folder_id/commits/:commit_id/files/:file_id/content", h.Commit.GetCommitFileContent)
 
 	// New: Folder-level commit listing and standalone commit tree/file retrieval
 	api.GET("/folders/:id/commits", h.Commit.ListFolderCommits)
