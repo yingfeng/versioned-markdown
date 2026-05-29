@@ -1,9 +1,11 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import type { TreeNode, FileCommit, Dataset } from '../types'
 import * as api from '../api'
 import MarkdownEditor from '../components/MarkdownEditor'
+import GraphView from '../components/GraphView'
 import { useTheme } from '../lib/theme/ThemeContext'
+import { buildGraph, type GraphNode, type GraphEdge } from '../lib/graph/wiki-graph'
 
 export default function WorkspacePage() {
   const { name } = useParams()
@@ -34,6 +36,10 @@ export default function WorkspacePage() {
   const [commitAllChanges, setCommitAllChanges] = useState<{ file_id: string; file_name: string; operation: string }[]>([])
   const [commitAllMsg, setCommitAllMsg] = useState('')
   const [renameValue, setRenameValue] = useState('')
+  const [showGraph, setShowGraph] = useState(false)
+  const [graphNodes, setGraphNodes] = useState<GraphNode[]>([])
+  const [graphEdges, setGraphEdges] = useState<GraphEdge[]>([])
+  const [graphLoading, setGraphLoading] = useState(false)
   const initialized = useRef(false)
 
   useEffect(() => {
@@ -74,6 +80,7 @@ export default function WorkspacePage() {
   }
 
   async function selectFile(f: TreeNode) {
+    setShowGraph(false)
     try {
       const text = await api.getFileContent(f.id)
       setContent(text); setOrigContent(text); setDirty(false)
@@ -199,6 +206,78 @@ export default function WorkspacePage() {
     } catch (e: any) { setError('Commit failed: ' + e.message) }
   }
 
+  // ── Knowledge Graph ──
+  function openGraphForWorkspace(folderNode: TreeNode) {
+    console.log('[Graph] openGraphForWorkspace called, folder:', folderNode.name)
+    setCurFolder(folderNode)
+    setSelFile(null)
+    setShowGraph(true)
+    setGraphLoading(true)
+    // Start async build
+    buildGraphData(folderNode)
+  }
+
+  async function buildGraphData(folderNode: TreeNode) {
+    console.log('[Graph] buildGraphData started, folder:', folderNode.name)
+    try {
+      const allFiles: { id: string; name: string }[] = []
+      const collect = (node: TreeNode) => {
+        if (node.type === 'file' && node.name.endsWith('.md')) {
+          allFiles.push({ id: node.id, name: node.name })
+        }
+        if (node.children) {
+          for (const child of node.children) collect(child)
+        }
+      }
+      collect(folderNode)
+      console.log('[Graph] found', allFiles.length, 'markdown files')
+
+      if (allFiles.length === 0) {
+        console.log('[Graph] no markdown files, setting empty graph')
+        setGraphNodes([])
+        setGraphEdges([])
+        setGraphLoading(false)
+        return
+      }
+
+      const BATCH = 20
+      const fileContents: { id: string; name: string; content: string }[] = []
+      for (let i = 0; i < allFiles.length; i += BATCH) {
+        const batch = allFiles.slice(i, i + BATCH)
+        const contents = await Promise.all(
+          batch.map(f => api.getFileContent(f.id).then(content => ({ ...f, content }))),
+        )
+        fileContents.push(...contents)
+      }
+      console.log('[Graph] fetched', fileContents.length, 'file contents')
+
+      const result = await buildGraph(fileContents)
+      console.log('[Graph] buildGraph result:', result.nodes.length, 'nodes,', result.edges.length, 'edges')
+      setGraphNodes(result.nodes)
+      setGraphEdges(result.edges)
+    } catch (e: any) {
+      console.error('[Graph] build error:', e)
+      setError('Failed to build graph: ' + e.message)
+    } finally {
+      setGraphLoading(false)
+    }
+  }
+
+  function navigateToFile(fileId: string) {
+    const find = (node: TreeNode): TreeNode | null => {
+      if (node.id === fileId) return node
+      if (node.children) {
+        for (const child of node.children) {
+          const found = find(child)
+          if (found) return found
+        }
+      }
+      return null
+    }
+    const target = rootTree ? find(rootTree) : null
+    if (target) selectFile(target)
+  }
+
   async function ensureLevel1Folder() {
     if (!dataset || !rootTree) return
     await api.createFolder(rootTree.id, 'My Workspace')
@@ -262,6 +341,7 @@ export default function WorkspacePage() {
               <div className="section-actions">
                 <button className="btn-icon-sm" onClick={() => setShowNewFile(true)} title="New File">+</button>
                 <button className="btn-icon-sm" onClick={() => setShowNewFolder(true)} title="New Folder">📁</button>
+                <button className="btn-icon-sm" onClick={() => { if (curFolder) { console.log('[Graph] 🕸 for folder:', curFolder.name); openGraphForWorkspace(curFolder); } }} title="Knowledge Graph">🕸</button>
                 <button className="btn-icon-sm" onClick={loadCommits} title="History">🕐</button>
               </div>
             </div>
@@ -321,7 +401,7 @@ export default function WorkspacePage() {
           </div>
         )}
 
-        {curFolder && !selFile && (
+        {curFolder && !selFile && !showGraph && (
           <div className="folder-view">
             <div className="folder-hdr">
               <div>
@@ -360,7 +440,31 @@ export default function WorkspacePage() {
           </div>
         )}
 
-        {selFile && (
+        {showGraph && curFolder && (
+          <div style={{ display: 'flex', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+            <div className="editor-toolbar">
+              <div className="editor-toolbar-left">
+                <span className="editor-breadcrumb">Graph: <strong>{curFolder.name}</strong></span>
+              </div>
+              <div className="toolbar-actions">
+                <button className="btn" onClick={() => setShowGraph(false)} style={{ padding: '4px 12px', fontSize: 12 }}>
+                  ✕ Close
+                </button>
+              </div>
+            </div>
+            <div style={{ flex: 1, minHeight: 0, position: 'relative' }}>
+              {graphLoading ? (
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', color: 'var(--nim-text-faint)', gap: 8 }}>
+                  <span style={{ fontSize: 18 }}>🕸</span> Building graph...
+                </div>
+              ) : (
+                <GraphView nodes={graphNodes} edges={graphEdges} onNavigate={navigateToFile} />
+              )}
+            </div>
+          </div>
+        )}
+
+        {selFile && !showGraph && (
           <div className="editor-view">
             <div className="editor-toolbar">
               <div className="editor-toolbar-left">
