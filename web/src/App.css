@@ -53,15 +53,42 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Inter', Robo
 .nav-item.active { background: var(--active); border-left-color: var(--accent); color: var(--accent); }
 .nav-item.sub { padding-left: 36px; font-size: 12.5px; }
 .nav-item.file { font-size: 12.5px; }
+.breadcrumb-bar {
+  padding: 8px 20px; font-size: 12px; color: var(--fg2);
+  border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 2px;
+}
+.breadcrumb-item { cursor: pointer; padding: 2px 4px; border-radius: 3px; }
+.breadcrumb-item:hover { background: var(--hover); color: var(--fg); }
+.breadcrumb-item.active { color: var(--accent); font-weight: 500; }
+.breadcrumb-sep { color: var(--fg3); margin: 0 2px; }
+
 .nav-icon { flex-shrink: 0; font-size: 14px; }
 .nav-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .nav-arrow { color: var(--fg3); font-size: 10px; }
 .nav-item-content { display: flex; align-items: center; gap: 8px; flex: 1; cursor: pointer; }
+.breadcrumb-bar {
+  padding: 8px 20px; font-size: 12px; color: var(--fg2);
+  border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 2px;
+}
+.breadcrumb-item { cursor: pointer; padding: 2px 4px; border-radius: 3px; }
+.breadcrumb-item:hover { background: var(--hover); color: var(--fg); }
+.breadcrumb-item.active { color: var(--accent); font-weight: 500; }
+.breadcrumb-sep { color: var(--fg3); margin: 0 2px; }
+
 .delete-btn {
   display: none; font-size: 11px; color: var(--fg3); cursor: pointer;
   padding: 2px 4px; border-radius: 3px; flex-shrink: 0;
 }
-.nav-item:hover .delete-btn { display: inline-block; }
+.nav-item:hover .breadcrumb-bar {
+  padding: 8px 20px; font-size: 12px; color: var(--fg2);
+  border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 2px;
+}
+.breadcrumb-item { cursor: pointer; padding: 2px 4px; border-radius: 3px; }
+.breadcrumb-item:hover { background: var(--hover); color: var(--fg); }
+.breadcrumb-item.active { color: var(--accent); font-weight: 500; }
+.breadcrumb-sep { color: var(--fg3); margin: 0 2px; }
+
+.delete-btn { display: inline-block; }
 .delete-btn:hover { color: var(--danger); background: rgba(239,83,80,0.1); }
 
 .rename-input {

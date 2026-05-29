@@ -17,7 +17,7 @@ func NewCommitHandler(fileSvc *service.FileService) *CommitHandler {
 
 // CreateCommit POST /api/v1/workspaces/:folder_id/commits
 func (h *CommitHandler) CreateCommit(c *gin.Context) {
-	folderID := c.Param("folder_id")
+	folderID := c.Param("id")
 	authorID := c.GetString("user_id")
 
 	var req struct {
@@ -43,7 +43,7 @@ func (h *CommitHandler) CreateCommit(c *gin.Context) {
 
 // ListCommits GET /api/v1/workspaces/:folder_id/commits
 func (h *CommitHandler) ListCommits(c *gin.Context) {
-	folderID := c.Param("folder_id")
+	folderID := c.Param("id")
 	page := parseInt(c.DefaultQuery("page", "1"), 1)
 	pageSize := parseInt(c.DefaultQuery("page_size", "20"), 20)
 

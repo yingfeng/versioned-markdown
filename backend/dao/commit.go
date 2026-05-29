@@ -37,6 +37,17 @@ func (d *CommitDAO) GetLatestCommit(folderID string) (*entity.FileCommit, error)
 	return &c, err
 }
 
+func (d *CommitDAO) DeleteByFolderID(folderID string) error {
+	return DB.Where("folder_id = ?", folderID).Delete(&entity.FileCommit{}).Error
+}
+
+func (d *CommitDAO) DeleteItemsByCommitIDs(commitIDs []string) error {
+	if len(commitIDs) == 0 {
+		return nil
+	}
+	return DB.Where("commit_id IN ?", commitIDs).Delete(&entity.FileCommitItem{}).Error
+}
+
 func (d *CommitDAO) CreateItem(item *entity.FileCommitItem) error {
 	if item.ID == "" {
 		item.ID = entity.NewID()

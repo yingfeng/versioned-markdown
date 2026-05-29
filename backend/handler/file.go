@@ -113,6 +113,30 @@ func (h *FileHandler) GetFileAncestors(c *gin.Context) {
 	ginJSON(c, gin.H{"data": chain})
 }
 
+// GetWorkspaceChanges GET /api/v1/workspaces/:id/changes
+func (h *FileHandler) GetWorkspaceChanges(c *gin.Context) {
+	folderID := c.Param("id")
+	changes, err := h.svc.GetUncommittedChanges(folderID)
+	if err != nil {
+		ginAbort(c, 500, "get changes: "+err.Error())
+		return
+	}
+	if changes == nil {
+		changes = []service.UncommittedChange{}
+	}
+	ginJSON(c, gin.H{"data": changes})
+}
+
+// DeleteWorkspace DELETE /api/v1/workspaces/:folder_id
+func (h *FileHandler) DeleteWorkspace(c *gin.Context) {
+	folderID := c.Param("id")
+	if err := h.svc.HardDeleteWorkspace(folderID); err != nil {
+		ginAbort(c, 500, "delete workspace: "+err.Error())
+		return
+	}
+	ginJSON(c, gin.H{"ok": true})
+}
+
 // CreateTextFile POST /api/v1/files/text
 func (h *FileHandler) CreateTextFile(c *gin.Context) {
 	tenantID := c.GetString("tenant_id")

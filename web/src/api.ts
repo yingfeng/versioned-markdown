@@ -24,6 +24,11 @@ export async function createDataset(name: string): Promise<Dataset> {
   return api<Dataset>('/datasets', { method: 'POST', body: JSON.stringify({ name, embd_id: 'default' }) })
 }
 
+export async function getWorkspaceChanges(folderID: string): Promise<{ file_id: string; file_name: string; operation: string }[]> {
+  const r = await api<{ data: any[] }>(`/workspaces/${folderID}/changes`)
+  return Array.isArray(r) ? r : (r as any).data || []
+}
+
 export async function getFolderTree(folderID: string): Promise<TreeNode> {
   return api<TreeNode>(`/folders/${folderID}/tree`)
 }
@@ -45,6 +50,10 @@ export async function createFolder(parentID: string, name: string): Promise<Docs
     method: 'POST',
     body: JSON.stringify({ parent_id: parentID, name }),
   })
+}
+
+export async function deleteWorkspace(folderID: string): Promise<void> {
+  await api(`/workspaces/${folderID}`, { method: 'DELETE' })
 }
 
 export async function deleteFiles(fileIDs: string[]): Promise<void> {

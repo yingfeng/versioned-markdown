@@ -1,39 +1,55 @@
 import { useState, useEffect } from 'react'
-import { useParams, useNavigate, Link } from 'react-router-dom'
-import type { TreeNode, FileCommit } from '../types'
+import { useParams, Link } from 'react-router-dom'
+import type { TreeNode } from '../types'
 import * as api from '../api'
 
 export default function CommitPage() {
-  const { folderId, commitId } = useParams()
-  const navigate = useNavigate()
-  const [commit, setCommit] = useState<FileCommit | null>(null)
+  const { name, commitId } = useParams()
   const [tree, setTree] = useState<TreeNode | null>(null)
+  const [curNode, setCurNode] = useState<TreeNode | null>(null)
   const [selFile, setSelFile] = useState<TreeNode | null>(null)
   const [content, setContent] = useState('')
   const [error, setError] = useState('')
+  const [breadcrumb, setBreadcrumb] = useState<{ id: string; name: string }[]>([])
 
-  useEffect(() => {
-    loadCommit()
-  }, [commitId])
+  useEffect(() => { loadCommit() }, [commitId])
 
   async function loadCommit() {
     if (!commitId) return
     try {
-      const ct = await api.getCommitTree(commitId)
-      setTree(ct)
-      // Basic commit info from first children
-      setCommit({ id: commitId, folder_id: folderId || '', parent_id: '', message: '', author_id: '', file_count: 0 } as FileCommit)
+      const t = await api.getCommitTree(commitId)
+      setTree(t)
+      setCurNode(t)
+      setBreadcrumb([{ id: t.id, name: t.name }])
     } catch (e: any) { setError('Failed to load commit: ' + e.message) }
+  }
+
+  function enterFolder(node: TreeNode) {
+    setCurNode(node)
+    setSelFile(null)
+    setContent('')
+    setBreadcrumb(prev => [...prev, { id: node.id, name: node.name }])
+  }
+
+  function goToBreadcrumb(idx: number) {
+    if (!tree) return
+    const target = findBreadcrumbNode(tree, breadcrumb, idx)
+    if (!target) return
+    setCurNode(target)
+    setSelFile(null)
+    setContent('')
+    setBreadcrumb(breadcrumb.slice(0, idx + 1))
   }
 
   async function selectFile(file: TreeNode) {
     if (!commitId) return
     setSelFile(file)
-    try {
-      const text = await api.getCommitFileContent(commitId, file.id)
-      setContent(text)
-    } catch { setContent('') }
+    try { setContent(await api.getCommitFileContent(commitId, file.id)) }
+    catch { setContent('') }
   }
+
+  const files = curNode?.children?.filter(c => c.type === 'file') || []
+  const subfolders = curNode?.children?.filter(c => c.type === 'folder') || []
 
   return (
     <div className="app">
@@ -43,30 +59,55 @@ export default function CommitPage() {
           <span className="badge badge-commit">HISTORY</span>
         </div>
         <div className="section-hdr" style={{padding:'12px 20px 6px'}}>
-          <span className="workspace-title" style={{padding:0,textTransform:'uppercase',letterSpacing:'1px',fontSize:'11px'}}>
+          <span style={{textTransform:'uppercase',letterSpacing:'1px',fontSize:'11px',color:'var(--fg3)'}}>
             Snapshot · {commitId?.slice(0,8)}
           </span>
-          <Link to={`/ws/${folderId}`} className="btn-icon-sm" style={{textDecoration:'none'}}>↩</Link>
+          <Link to="/" className="btn-icon-sm" style={{textDecoration:'none'}}>↩</Link>
         </div>
-        <div className="commit-meta" style={{padding:'0 20px 8px',fontSize:'11px'}}>{commit?.file_count || 0} files in this snapshot</div>
+
+        <div className="breadcrumb-bar">
+          {breadcrumb.map((b, i) => (
+            <span key={b.id}>
+              {i > 0 && <span className="breadcrumb-sep">/</span>}
+              <span className={`breadcrumb-item ${i === breadcrumb.length - 1 ? 'active' : ''}`}
+                onClick={() => goToBreadcrumb(i)}>
+                {b.name}
+              </span>
+            </span>
+          ))}
+        </div>
+
         <div className="files-section">
-          {tree && renderCommitTree(tree, selFile, selectFile)}
-          {!tree && !error && <div className="hint">Loading...</div>}
-          {error && <div className="hint" style={{color:'var(--danger)'}}>{error}</div>}
+          {subfolders.map(f => (
+            <div key={f.id} className="nav-item sub folder" onClick={() => enterFolder(f)}>
+              <span>📁</span>
+              <span className="nav-label" style={{marginLeft:8}}>{f.name}</span>
+            </div>
+          ))}
+          {files.map(f => (
+            <div key={f.id}
+              className={`nav-item sub file ${selFile?.id === f.id ? 'active' : ''}`}
+              onClick={() => selectFile(f)}>
+              <span>📄</span>
+              <span className="nav-label" style={{marginLeft:8}}>{f.name}</span>
+            </div>
+          ))}
+          {subfolders.length === 0 && files.length === 0 && (
+            <div className="hint" style={{padding:'12px 20px'}}>Empty folder</div>
+          )}
         </div>
       </aside>
 
       <main className="main">
+        {error && <div className="error-bar">{error}</div>}
         {selFile ? (
           <div className="editor-view">
             <div className="editor-toolbar">
               <div className="editor-toolbar-left">
-                <span className="editor-breadcrumb"><strong>{selFile.name}</strong></span>
-                <span className="badge badge-commit">Read-only</span>
+                <span><strong>{selFile.name}</strong></span>
+                <span className="badge badge-commit" style={{marginLeft:8}}>Read-only</span>
               </div>
-              <div className="toolbar-actions">
-                <Link to={`/ws/${folderId}`} className="btn">Back to Current</Link>
-              </div>
+              <Link to="/" className="btn">Back to Home</Link>
             </div>
             <div className="editor-body">
               <textarea className="editor-textarea" value={content} readOnly placeholder="File content at this version..." />
@@ -79,11 +120,9 @@ export default function CommitPage() {
         ) : (
           <div className="welcome">
             <h1>📜 Commit Snapshot</h1>
-            <p>This is a read-only view of the workspace at this commit</p>
-            <p className="hint">Select a file from the sidebar to view its content at this version</p>
-            <Link to={`/ws/${folderId}`} className="btn-primary" style={{marginTop:16,display:'inline-flex',padding:'8px 18px',textDecoration:'none'}}>
-              ↩ Back to Current Version
-            </Link>
+            <p>Browse the workspace tree in the sidebar</p>
+            <p className="hint">Click folders to navigate · Click files to view content at this version</p>
+            <Link to="/" className="btn-primary" style={{marginTop:16,display:'inline-flex',padding:'8px 18px',textDecoration:'none'}}>↩ Back to Home</Link>
           </div>
         )}
       </main>
@@ -91,32 +130,16 @@ export default function CommitPage() {
   )
 }
 
-function renderCommitTree(
-  node: TreeNode,
-  selFile: TreeNode | null,
-  onClick: (f: TreeNode) => void
-): JSX.Element[] {
-  return (node.children || []).map(child => {
-    if (child.type === 'folder') {
-      return (
-        <span key={child.id}>
-          <div className="nav-item sub folder" style={{cursor:'default'}}>
-            <span className="nav-icon">📁</span>
-            <span className="nav-label">{child.name}</span>
-          </div>
-          {renderCommitTree(child, selFile, onClick)}
-        </span>
-      )
-    }
-    return (
-      <div key={child.id}
-        className={`nav-item sub file ${selFile?.id === child.id ? 'active' : ''}`}
-        onClick={() => onClick(child)}>
-        <span className="nav-icon">📄</span>
-        <span className="nav-label">{child.name}</span>
-      </div>
-    )
-  })
+function findBreadcrumbNode(tree: TreeNode, breadcrumb: { id: string; name: string }[], targetIdx: number): TreeNode | undefined {
+  if (targetIdx === 0) return tree
+  let result: TreeNode | undefined
+  function walk(n: TreeNode, depth: number) {
+    if (depth === targetIdx && n.id === breadcrumb[targetIdx]?.id) { result = n; return }
+    if (result || depth >= targetIdx) return
+    for (const c of n.children || []) walk(c, depth + 1)
+  }
+  walk(tree, 0)
+  return result
 }
 
 function renderMarkdown(md: string): string {

@@ -1,4 +1,5 @@
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route } from 'react-router-dom'
+import RootPage from './pages/RootPage'
 import WorkspacePage from './pages/WorkspacePage'
 import CommitPage from './pages/CommitPage'
 
@@ -6,9 +7,9 @@ export default function App() {
   return (
     <BrowserRouter>
       <Routes>
-        <Route path="/ws/:folderId" element={<WorkspacePage />} />
-        <Route path="/ws/:folderId/commit/:commitId" element={<CommitPage />} />
-        <Route path="*" element={<Navigate to="/ws/default" replace />} />
+        <Route path="/" element={<RootPage />} />
+        <Route path="/:name" element={<WorkspacePage />} />
+        <Route path="/:name/commits/:commitId" element={<CommitPage />} />
       </Routes>
     </BrowserRouter>
   )

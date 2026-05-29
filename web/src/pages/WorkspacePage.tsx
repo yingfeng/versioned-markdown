@@ -4,7 +4,7 @@ import type { TreeNode, FileCommit, Dataset } from '../types'
 import * as api from '../api'
 
 export default function WorkspacePage() {
-  const { folderId } = useParams()
+  const { name } = useParams()
   const navigate = useNavigate()
   const [dataset, setDataset] = useState<Dataset | null>(null)
   const [rootTree, setRootTree] = useState<TreeNode | null>(null)
@@ -26,6 +26,10 @@ export default function WorkspacePage() {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [deleteName, setDeleteName] = useState('')
   const [deleteMsg, setDeleteMsg] = useState('')
+  const [deleteWsId, setDeleteWsId] = useState<string | null>(null)
+  const [showCommitAll, setShowCommitAll] = useState(false)
+  const [commitAllChanges, setCommitAllChanges] = useState<{ file_id: string; file_name: string; operation: string }[]>([])
+  const [commitAllMsg, setCommitAllMsg] = useState('')
   const [renameValue, setRenameValue] = useState('')
   const initialized = useRef(false)
 
@@ -43,11 +47,11 @@ export default function WorkspacePage() {
       const tree = await api.getFolderTree(ds[0].id)
       setRootTree(tree)
       // Navigate to the folder from URL, or first folder
-      const targetFolderId = folderId && folderId !== 'default' ? folderId : tree?.children?.find(c => c.type === 'folder')?.id
-      if (targetFolderId) {
-        const node = findNode(tree, targetFolderId)
-        if (node) selectFolder(node)
-      }
+      // Resolve name → folder: try name match first, fallback to ID
+      let targetNode = tree?.children?.find(c => c.type === 'folder' && c.name === decodeURIComponent(name || ''))
+      if (!targetNode && name && name !== 'default') targetNode = findNode(tree, name)
+      if (!targetNode) targetNode = tree?.children?.find(c => c.type === 'folder')
+      if (targetNode) selectFolder(targetNode)
     } catch (e: any) { setError('Failed to init: ' + e.message) }
   }
 
@@ -63,7 +67,7 @@ export default function WorkspacePage() {
   function selectFolder(f: TreeNode) {
     setCurFolder(f); setSelFile(null); setDirty(false); setError('')
     setShowCommits(false)
-    navigate(`/ws/${f.id}`, { replace: true })
+    navigate(`/${encodeURIComponent(f.name)}`, { replace: true })
   }
 
   async function selectFile(f: TreeNode) {
@@ -75,7 +79,7 @@ export default function WorkspacePage() {
   }
 
   function viewCommit(c: FileCommit) {
-    navigate(`/ws/${curFolder?.id}/commit/${c.id}`)
+    navigate(`/${encodeURIComponent(curFolder?.name || '')}/commits/${c.id}`)
   }
 
   async function handleCreateFile() {
@@ -145,6 +149,53 @@ export default function WorkspacePage() {
     } catch (e: any) { setError('Rename failed: ' + e.message); setRenamingWs(null) }
   }
 
+  async function deleteWorkspaceWs(f: TreeNode) {
+    if (!dataset) return
+    if (!confirm(`确认永久删除 workspace "${f.name}"？\n所有文件、提交历史将被物理删除，无法恢复。`)) return
+    try {
+      await api.deleteWorkspace(f.id)
+      if (curFolder?.id === f.id) { setCurFolder(null); setSelFile(null) }
+      const tree = await api.getFolderTree(dataset.id)
+      setRootTree(tree)
+    } catch (e: any) { setError('Delete workspace failed: ' + e.message) }
+  }
+
+  async function openCommitAll() {
+    if (!curFolder) return
+    try {
+      const changes = await api.getWorkspaceChanges(curFolder.id)
+      if (changes.length === 0) {
+        alert('No uncommitted changes.')
+        return
+      }
+      setCommitAllChanges(changes)
+      setCommitAllMsg('')
+      setShowCommitAll(true)
+    } catch (e: any) { setError('Failed to get changes: ' + e.message) }
+  }
+
+  async function confirmCommitAll() {
+    if (!curFolder || !dataset || !commitAllMsg.trim()) return
+    const files: { file_id: string; file_name: string; operation: string; content: string }[] = []
+    for (const ch of commitAllChanges) {
+      if (ch.operation === 'delete') {
+        files.push({ file_id: ch.file_id, file_name: ch.file_name, operation: 'delete', content: '' })
+      } else {
+        try {
+          const content = await api.getFileContent(ch.file_id)
+          files.push({ file_id: ch.file_id, file_name: ch.file_name, operation: ch.operation, content })
+        } catch { continue }
+      }
+    }
+    if (files.length === 0) return
+    try {
+      await api.createCommit(curFolder.id, commitAllMsg, files)
+      setShowCommitAll(false)
+      setDirty(false)
+      setCommits(await api.listFolderCommits(curFolder.id))
+    } catch (e: any) { setError('Commit failed: ' + e.message) }
+  }
+
   async function ensureLevel1Folder() {
     if (!dataset || !rootTree) return
     await api.createFolder(rootTree.id, 'My Workspace')
@@ -168,7 +219,10 @@ export default function WorkspacePage() {
 
         <div className="section-hdr" style={{padding:'6px 20px'}}>
           <span className="workspace-title" style={{padding:0,textTransform:'uppercase',letterSpacing:'1px'}}>Workspace</span>
-          <button className="btn-icon-sm" onClick={ensureLevel1Folder} title="New Workspace">+</button>
+          <div style={{display:'flex',gap:2}}>
+            <button className="btn-icon-sm" onClick={openCommitAll} title="Commit All Changes">✔</button>
+            <button className="btn-icon-sm" onClick={ensureLevel1Folder} title="New Workspace">+</button>
+          </div>
         </div>
         {folders.map(f => (
           <div key={f.id}
@@ -181,11 +235,14 @@ export default function WorkspacePage() {
                 onKeyDown={e => { if (e.key === 'Enter') confirmRename(); if (e.key === 'Escape') setRenamingWs(null) }}
                 onClick={e => e.stopPropagation()} autoFocus />
             ) : (
-              <span className="nav-item-content" onClick={() => selectFolder(f)}>
-                <span className="nav-icon">📁</span>
-                <span className="nav-label">{f.name}</span>
-                <span className="nav-arrow">{'>'}</span>
-              </span>
+              <>
+                <span className="nav-item-content" onClick={() => selectFolder(f)}>
+                  <span className="nav-icon">📁</span>
+                  <span className="nav-label">{f.name}</span>
+                  <span className="nav-arrow">{'>'}</span>
+                </span>
+                <span className="delete-btn" onClick={e => { e.stopPropagation(); deleteWorkspaceWs(f); }}>✕</span>
+              </>
             )}
           </div>
         ))}
@@ -387,6 +444,30 @@ export default function WorkspacePage() {
             <div className="dlg-actions">
               <button className="btn" onClick={() => setDeleteTarget(null)}>Cancel</button>
               <button className="btn-primary" onClick={confirmDelete}>Delete & Commit</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Commit All dialog */}
+      {showCommitAll && (
+        <div className="overlay" onClick={() => setShowCommitAll(false)}>
+          <div className="dialog dialog-commit" onClick={e => e.stopPropagation()}>
+            <h3>✔ Commit All Changes</h3>
+            <div className="commit-summary">
+              {commitAllChanges.map(ch => (
+                <div key={ch.file_id} className="commit-file-row" style={{marginBottom:4}}>
+                  <span>📄 {ch.file_name}</span>
+                  <span className={`badge ${ch.operation === 'delete' ? 'badge-modify' : ''}`}>{ch.operation}</span>
+                </div>
+              ))}
+            </div>
+            <input className="input" value={commitAllMsg} onChange={e => setCommitAllMsg(e.target.value)}
+              placeholder="Describe your changes..." autoFocus
+              onKeyDown={e => e.key === 'Enter' && confirmCommitAll()} />
+            <div className="dlg-actions">
+              <button className="btn" onClick={() => setShowCommitAll(false)}>Cancel</button>
+              <button className="btn-primary" onClick={confirmCommitAll} disabled={!commitAllMsg.trim()}>Commit</button>
             </div>
           </div>
         </div>
