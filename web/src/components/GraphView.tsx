@@ -42,7 +42,7 @@ function EntityNode({ data }: NodeProps<{ label: string; linkCount: number }>) {
         cursor: 'pointer',
         transition: 'all 0.2s',
       }}
-      onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 4px 16px rgba(96,165,250,0.3)'; e.currentTarget.style.transform = 'scale(1.05)'; }}
+      onMouseEnter={e => { e.currentTarget.style.boxShadow = '0 4px 16px color-mix(in srgb, var(--nim-primary) 30%, transparent)'; e.currentTarget.style.transform = 'scale(1.05)'; }}
       onMouseLeave={e => { e.currentTarget.style.boxShadow = '0 2px 8px rgba(0,0,0,0.15)'; e.currentTarget.style.transform = 'scale(1)'; }}
       title={`${data.label} — mentioned in ${data.linkCount} page${data.linkCount > 1 ? 's' : ''}`}
     >
@@ -250,7 +250,7 @@ export default function GraphView({ nodes: srcNodes, edges: srcEdges, onNavigate
           className="graph-controls"
         />
         <MiniMap
-          nodeColor={() => '#60a5fa'}
+          nodeColor={() => { const s = getComputedStyle(document.documentElement); return s.getPropertyValue('--nim-primary').trim() || '#60a5fa'; }}
           style={{
             background: 'var(--nim-bg-secondary)',
             border: '1px solid var(--nim-border)',

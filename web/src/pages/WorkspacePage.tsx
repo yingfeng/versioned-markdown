@@ -40,6 +40,7 @@ export default function WorkspacePage() {
   const [graphNodes, setGraphNodes] = useState<GraphNode[]>([])
   const [graphEdges, setGraphEdges] = useState<GraphEdge[]>([])
   const [graphLoading, setGraphLoading] = useState(false)
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(new Set())
   const initialized = useRef(false)
 
   useEffect(() => {
@@ -291,6 +292,61 @@ export default function WorkspacePage() {
   const files = curFolder?.children?.filter(c => c.type === 'file') || []
   const subfolders = curFolder?.children?.filter(c => c.type === 'folder') || []
 
+  // ── Tree view expand/collapse ──
+  function toggleExpand(folderId: string) {
+    setExpandedFolders(prev => {
+      const next = new Set(prev)
+      if (next.has(folderId)) next.delete(folderId)
+      else next.add(folderId)
+      return next
+    })
+  }
+
+  function renderTree(node: TreeNode, depth: number): React.ReactNode {
+    if (node.type !== 'folder') return null
+    const isExpanded = expandedFolders.has(node.id)
+    const isActive = curFolder?.id === node.id
+    const children = node.children || []
+
+    return (
+      <div key={node.id}>
+        <div
+          className={`nav-item ${isActive ? 'active' : ''}`}
+          style={{ paddingLeft: 8 + depth * 16 }}
+        >
+          <span className="nav-chevron" onClick={(e) => { e.stopPropagation(); toggleExpand(node.id); }}>
+            {isExpanded ? '▾' : '▸'}
+          </span>
+          <span className="nav-folder-icon" onClick={() => selectFolder(node)}>
+            {isExpanded ? '📂' : '📁'}
+          </span>
+          <span className="nav-label" onClick={() => selectFolder(node)}>{node.name}</span>
+          <span className="delete-btn" onClick={(e) => { e.stopPropagation(); deleteWorkspaceWs(node); }}>✕</span>
+        </div>
+        {isExpanded && children.map(child => {
+          if (child.type === 'folder') return renderTree(child, depth + 1)
+          if (child.type === 'file' && child.name.endsWith('.md')) {
+            const isFileActive = selFile?.id === child.id
+            return (
+              <div
+                key={child.id}
+                className={`nav-item sub ${isFileActive ? 'active' : ''}`}
+                style={{ paddingLeft: 8 + (depth + 1) * 16 }}
+                onClick={() => selectFile(child)}
+              >
+                <span className="nav-spacer" />
+                <span className="nav-file-icon">📄</span>
+                <span className="nav-label">{child.name}</span>
+                <span className="delete-btn" onClick={(e) => { e.stopPropagation(); deleteItem(child.id, child.name); }}>✕</span>
+              </div>
+            )
+          }
+          return null
+        })}
+      </div>
+    )
+  }
+
   return (
     <div className="app">
       <aside className="sidebar">
@@ -310,58 +366,17 @@ export default function WorkspacePage() {
             <button className="btn-icon-sm" onClick={ensureLevel1Folder} title="New Workspace">+</button>
           </div>
         </div>
-        {folders.map(f => (
-          <div key={f.id}
-            className={`nav-item ${curFolder?.id === f.id ? 'active' : ''}`}
-            onDoubleClick={() => startRename(f)}>
-            {renamingWs === f.id ? (
-              <input className="rename-input"
-                value={renameValue} onChange={e => setRenameValue(e.target.value)}
-                onBlur={confirmRename}
-                onKeyDown={e => { if (e.key === 'Enter') confirmRename(); if (e.key === 'Escape') setRenamingWs(null) }}
-                onClick={e => e.stopPropagation()} autoFocus />
-            ) : (
-              <>
-                <span className="nav-item-content" onClick={() => selectFolder(f)}>
-                  <span className="nav-icon">📁</span>
-                  <span className="nav-label">{f.name}</span>
-                  <span className="nav-arrow">{'>'}</span>
-                </span>
-                <span className="delete-btn" onClick={e => { e.stopPropagation(); deleteWorkspaceWs(f); }}>✕</span>
-              </>
-            )}
-          </div>
-        ))}
+        <div style={{ flex: 1, overflowY: 'auto', overflowX: 'hidden', padding: '4px 0' }}>
+          {folders.map(f => renderTree(f, 0))}
+        </div>
 
         {curFolder && (
-          <>
-            <div className="divider" />
-            <div className="section-hdr">
-              <span className="section-label">{curFolder.name}</span>
-              <div className="section-actions">
-                <button className="btn-icon-sm" onClick={() => setShowNewFile(true)} title="New File">+</button>
-                <button className="btn-icon-sm" onClick={() => setShowNewFolder(true)} title="New Folder">📁</button>
-                <button className="btn-icon-sm" onClick={() => { if (curFolder) { console.log('[Graph] 🕸 for folder:', curFolder.name); openGraphForWorkspace(curFolder); } }} title="Knowledge Graph">🕸</button>
-                <button className="btn-icon-sm" onClick={loadCommits} title="History">🕐</button>
-              </div>
-            </div>
-            <div className="files-section">
-              {subfolders.map(f => (
-                <div key={f.id} className="nav-item sub folder" onClick={() => selectFolder(f)}>
-                  <span className="nav-icon">📁</span>
-                  <span className="nav-label">{f.name}</span>
-                  <span className="delete-btn" onClick={e => { e.stopPropagation(); deleteItem(f.id, f.name); }}>✕</span>
-                </div>
-              ))}
-              {files.map(f => (
-                <div key={f.id} className={`nav-item sub file ${selFile?.id === f.id ? 'active' : ''}`} onClick={() => selectFile(f)}>
-                  <span className="nav-icon">📄</span>
-                  <span className="nav-label">{f.name}</span>
-                  <span className="delete-btn" onClick={e => { e.stopPropagation(); deleteItem(f.id, f.name); }}>✕</span>
-                </div>
-              ))}
-            </div>
-          </>
+          <div style={{ display: 'flex', gap: 2, padding: '4px 12px' }}>
+            <button className="btn-icon-sm" onClick={() => setShowNewFile(true)} title="New File" style={{ fontSize: 12 }}>+ Page</button>
+            <button className="btn-icon-sm" onClick={() => setShowNewFolder(true)} title="New Folder" style={{ fontSize: 12 }}>📁</button>
+            <button className="btn-icon-sm" onClick={() => { if (curFolder) openGraphForWorkspace(curFolder); }} title="Knowledge Graph" style={{ fontSize: 12 }}>🕸</button>
+            <button className="btn-icon-sm" onClick={loadCommits} title="History" style={{ fontSize: 12 }}>🕐</button>
+          </div>
         )}
 
         {showCommits && (
