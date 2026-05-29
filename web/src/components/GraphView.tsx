@@ -206,6 +206,21 @@ export default function GraphView({ nodes: srcNodes, edges: srcEdges, onNavigate
 
   return (
     <div style={{ width: '100%', height: '100%', position: 'relative' }}>
+      <style>{`
+        .graph-controls { overflow: hidden; }
+        .graph-controls button {
+          background: var(--nim-bg-secondary) !important;
+          border-bottom: 1px solid var(--nim-border) !important;
+          fill: var(--nim-text) !important;
+          color: var(--nim-text) !important;
+        }
+        .graph-controls button:hover {
+          background: var(--nim-bg-hover) !important;
+        }
+        .graph-controls button svg {
+          fill: var(--nim-text) !important;
+        }
+      `}</style>
       <div style={{ position: 'absolute', top: 8, left: 8, zIndex: 10, fontSize: 11, color: 'var(--nim-text-faint)', padding: '4px 10px', background: 'var(--nim-bg-tertiary)', borderRadius: 6, border: '1px solid var(--nim-border)' }}>
         {srcNodes.length} entities · {srcEdges.length} connections
       </div>
@@ -232,6 +247,7 @@ export default function GraphView({ nodes: srcNodes, edges: srcEdges, onNavigate
             borderRadius: 8,
             color: 'var(--nim-text)',
           }}
+          className="graph-controls"
         />
         <MiniMap
           nodeColor={() => '#60a5fa'}
