@@ -477,6 +477,7 @@
 
 #root .nim-table-cell {
   border: 1px solid var(--nim-table-border);
+  color: var(--nim-text);
   vertical-align: top;
   text-align: start;
   padding: 6px 8px;
@@ -502,6 +503,7 @@
 
 #root .nim-table-cell-header {
   background-color: var(--nim-table-header);
+  color: var(--nim-text);
   text-align: start;
 }
 

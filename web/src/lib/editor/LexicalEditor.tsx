@@ -89,6 +89,7 @@ function ChangeListener({ onChange, transformers }: { onChange?: (md: string) =>
 
 import ToolbarPlugin from './plugins/ToolbarPlugin';
 import FloatingSelectionToolbar from './plugins/FloatingSelectionToolbar';
+import TableActionsPlugin from './plugins/TableActionsPlugin';
 
 export default function LexicalEditor({ content, onChange, readOnly = false, placeholder = 'Start writing...', onToggleSource, showSource = false }: Props): JSX.Element {
   const transformers = useMemo(() => CORE_TRANSFORMERS, []);
@@ -126,6 +127,7 @@ export default function LexicalEditor({ content, onChange, readOnly = false, pla
             <LinkPlugin />
             <HashtagPlugin />
             <TablePlugin />
+            <TableActionsPlugin />
           </div>
         </LexicalComposer>
       </div>
