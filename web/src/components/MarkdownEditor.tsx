@@ -49,7 +49,7 @@ export default function MarkdownEditor({ content, onChange, readOnly }: Props) {
     <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 }}>
       <div className="nim-editor-container">
         {/* WYSIWYG */}
-        <div style={{ flex: 1, display: showSource ? 'none' : 'flex', flexDirection: 'column' }}>
+        <div style={{ flex: 1, display: showSource ? 'none' : 'flex', flexDirection: 'column', minHeight: 0 }}>
           <LexicalEditor
             content={content}
             onChange={handleWysiwygChange}
@@ -60,7 +60,7 @@ export default function MarkdownEditor({ content, onChange, readOnly }: Props) {
           />
         </div>
         {/* Raw / Source */}
-        <div style={{ flex: 1, display: showSource ? 'flex' : 'none', flexDirection: 'column' }}>
+        <div style={{ flex: 1, display: showSource ? 'flex' : 'none', flexDirection: 'column', minHeight: 0 }}>
           {readOnly ? (
             <div style={{ flex: 1, overflow: 'auto', padding: '16px 20px', fontSize: 13, lineHeight: 1.6, fontFamily: 'Menlo, Consolas, monospace', background: 'var(--nim-code-bg)', color: 'var(--nim-code-text)', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '4px 12px', borderBottom: '1px solid var(--nim-border)', background: 'var(--nim-toolbar-bg)', flexShrink: 0, margin: '-16px -20px 12px' }}>
