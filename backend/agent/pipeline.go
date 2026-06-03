@@ -211,12 +211,14 @@ func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 		task.AppendLog("  - %s (%d sources): %s\n", t.Name, len(t.SourcePaths), t.Description)
 	}
 
-	// P3: Compile each topic article (P0: passes full topic context for cross-linking)
+	// P3: Compile each topic article with:
+	//   - cross-topic context (previously compiled articles)
+	//   - on-demand file reading (tool calling)
 	var allOutputs []OutputFile
 	compileStart := time.Now()
 	for i, topic := range topics {
 		tStart := time.Now()
-		article := c.compilePhase(task, topic, files, topics, outputDir)
+		article := c.compilePhase(task, topic, files, topics, allOutputs, outputDir)
 		elapsed := time.Since(tStart).Round(time.Second)
 		if article != nil {
 			allOutputs = append(allOutputs, *article)
@@ -230,18 +232,22 @@ func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 	compileTotal := time.Since(compileStart).Round(time.Second)
 	task.AppendLog("[COMPILE] All %d topics compiled in %v\n", len(topics), compileTotal)
 
-	// P4: Concept discovery — find cross-topic patterns
+	// P4: Post-compilation consistency review — re-read & fix overlap
+	task.AppendLog("[REVIEW] Consistency check across %d articles...\n", len(allOutputs))
+	allOutputs = c.consistencyReview(task, allOutputs)
+
+	// P5: Concept discovery — find cross-topic patterns
 	concepts := c.conceptPhase(task, topics, allOutputs)
 	for _, concept := range concepts {
 		allOutputs = append(allOutputs, concept)
 	}
 
-	// P5: INDEX.md + log.md
+	// P6: INDEX.md + log.md
 	allOutputs = append(allOutputs,
 		c.generateIndex(task, topics, len(files), outputDir),
 		c.generateLog(task, topics, len(files), outputDir))
 
-	// P6: Quality review (P3)
+	// P7: Quality review (P3)
 	allOutputs = c.qualityReview(task, topics, allOutputs)
 
 	// Write + commit
@@ -508,10 +514,14 @@ func (c *Compiler) scanBatch(task *TaskState, files []FileNode, instructions str
 		return nil
 	}
 
+	// Strip possible ```json fence
+	content = stripJSONFence(content)
+
 	var result struct {
 		Topics []TopicInfo `json:"topics"`
 	}
 	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		task.AppendLog("[SCAN] JSON parse error, first 200 chars: %s\n", truncate(content, 200))
 		return nil
 	}
 	return result.Topics
@@ -588,9 +598,9 @@ func (c *Compiler) fallbackTopics(files []FileNode) []TopicInfo {
 	return topics
 }
 
-// ========== P0: Compile with Cross-Topic Context ==========
+// ========== P0: Compile with Cross-Topic Context + On-Demand File Reading ==========
 
-func (c *Compiler) compilePhase(task *TaskState, topic TopicInfo, allFiles []FileNode, allTopics []TopicInfo, outputDir string) *OutputFile {
+func (c *Compiler) compilePhase(task *TaskState, topic TopicInfo, allFiles []FileNode, allTopics []TopicInfo, compiled []OutputFile, outputDir string) *OutputFile {
 	task.AppendLog("[COMPILE] Topic '%s' (%d sources)...\n", topic.Name, len(topic.SourcePaths))
 
 	// Build other-topics context for cross-linking
@@ -602,6 +612,22 @@ func (c *Compiler) compilePhase(task *TaskState, topic TopicInfo, allFiles []Fil
 		}
 	}
 
+	// Build already compiled articles context — tells the LLM what's been covered
+	var prevCtx strings.Builder
+	if len(compiled) > 0 {
+		prevCtx.WriteString("\n## 已编译的文章（防止内容重复）\n\n")
+		for _, art := range compiled {
+			summary := art.Content
+			if len(summary) > 500 {
+				summary = summary[:500] + "..."
+			}
+			prevCtx.WriteString(fmt.Sprintf("### %s\n```\n%s\n```\n\n", art.Path, summary))
+		}
+		prevCtx.WriteString("注意：以上文章已经存在。新文章的内容不得与这些文章重复。\n")
+		prevCtx.WriteString("如果发现你的主题与已编译文章重叠，应当引用 [[ExistingArticle]] 而非重写。\n\n")
+	}
+
+	// Collect relevant source files for this topic
 	var relevantFiles []FileNode
 	topicPaths := make(map[string]bool)
 	for _, p := range topic.SourcePaths {
@@ -613,54 +639,181 @@ func (c *Compiler) compilePhase(task *TaskState, topic TopicInfo, allFiles []Fil
 		}
 	}
 
+	// Build the prompt with all context
+	prompt := c.buildCompilePrompt(topic, relevantFiles, allFiles, otherCtx.String(), prevCtx.String())
+
+	// Call with retry + on-demand file reading
+	const maxRounds = 3 // max tool-calling rounds
+	for round := 0; round < maxRounds; round++ {
+		content := c.chatWithRetry(task, prompt)
+
+		if content == "" {
+			return nil
+		}
+		content = stripJSONFence(content)
+
+		// Check for on-demand file requests (tool calling)
+		if readFile := extractReadRequest(content); readFile != "" {
+			task.AppendLog("[TOOL] LLM requested additional file: %s\n", readFile)
+			fileContent := c.readFileByName(allFiles, readFile)
+			if fileContent != "" {
+				prompt += fmt.Sprintf("\n---\nLLM requested additional context from `%s`:\n```\n%s\n```\n请基于此补充内容后输出完整文章。\n", readFile, fileContent)
+				continue
+			}
+		}
+
+		// Check for overlap warning marker
+		if strings.Contains(content, "[OVERLAP]") {
+			task.AppendLog("[TOOL] LLM detected overlap, adjusting...\n")
+			prompt += "\n注意：上轮输出包含重叠内容标记。请去掉与已发表文章重复的部分，用 [[链接]] 替代。重新输出完整文章。\n"
+			continue
+		}
+
+		return &OutputFile{Path: topic.Name + ".md", Content: content}
+	}
+
+	task.AppendLog("[COMPILE] Max rounds reached, using last output\n")
+	return nil
+}
+
+// buildCompilePrompt assembles the compilation prompt with all context.
+func (c *Compiler) buildCompilePrompt(topic TopicInfo, relevantFiles, allFiles []FileNode, otherCtx, prevCtx string) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("编译主题「%s」的知识文章。\n\n", topic.Description))
-	b.WriteString(otherCtx.String())
-	b.WriteString("\n")
+	b.WriteString(otherCtx)
+	b.WriteString(prevCtx)
 	b.WriteString(fmt.Sprintf("主题描述：%s\n\n", topic.Description))
+
+	// Full content of topic's source files
 	for _, f := range relevantFiles {
 		b.WriteString(fmt.Sprintf("### %s\n```\n%s\n```\n\n", f.Path, f.Content))
 	}
 
-	systemMsg := `你正在编译一篇知识文章。只输出纯 Markdown，不要 JSON 包裹。
+	// File index for on-demand reading (tool calling)
+	b.WriteString("\n## 其他源文件索引\n\n")
+	b.WriteString("以下文件未包含在上述内容中。如果你需要更多上下文，可以在输出中包含标记：\n")
+	b.WriteString("[READ: filename.md]\n")
+	b.WriteString("系统会自动读取该文件并重新调用你。\n\n")
+	for _, f := range allFiles {
+		if !topicPaths(f, relevantFiles) {
+			kw := strings.Join(f.Keywords, ", ")
+			if kw == "" {
+				kw = "(无)"
+			}
+			b.WriteString(fmt.Sprintf("- %s [关键词: %s]\n", f.Path, kw))
+		}
+	}
 
-要求:
-1. 合成多个源文件的信息，不要照搬一个源
-2. 用自己的语言重新组织
-3. 正文必须用 [[OtherArticle]] 交叉引用其他主题
-4. 每个小节末尾标记: [coverage: high/medium/low]
-5. 文章结构: # 标题 → ## 概要 → ## 内容 → ## 资料来源
+	return b.String()
+}
 
-文件将保存为` + topic.Name + `.md。直接输出markdown内容，不要包含JSON。`
+func topicPaths(f FileNode, relevant []FileNode) bool {
+	for _, r := range relevant {
+		if r.Path == f.Path {
+			return true
+		}
+	}
+	return false
+}
 
-	// Compile with timeout and retry
-	const compileTimeout = 120 * time.Second
-	const compileRetries = 2
-	var content string
-	var err error
-	for attempt := 0; attempt < compileRetries; attempt++ {
+// extractReadRequest checks if the response contains a [READ: path] marker.
+func extractReadRequest(content string) string {
+	idx := strings.Index(content, "[READ:")
+	if idx < 0 {
+		return ""
+	}
+	end := strings.Index(content[idx:], "]")
+	if end < 0 {
+		return ""
+	}
+	path := strings.TrimSpace(content[idx+6 : idx+end])
+	if path == "" {
+		return ""
+	}
+	return path
+}
+
+// readFileByName finds a file by path and returns its content.
+func (c *Compiler) readFileByName(files []FileNode, path string) string {
+	for _, f := range files {
+		if f.Path == path || f.Name == path {
+			return f.Content
+		}
+	}
+	return ""
+}
+
+// chatWithRetry sends a prompt to the LLM with timeout and retry.
+func (c *Compiler) chatWithRetry(task *TaskState, prompt string) string {
+	const timeout = 120 * time.Second
+	const retries = 2
+	for attempt := 0; attempt < retries; attempt++ {
 		if attempt > 0 {
-			task.AppendLog("[RETRY] compilePhase attempt %d\n", attempt+1)
+			task.AppendLog("[RETRY] Chat attempt %d\n", attempt+1)
 		}
-		compileCtx, compileCancel := context.WithTimeout(context.Background(), compileTimeout)
-		content, err = c.llm.ChatRaw(compileCtx, systemMsg, b.String())
-		compileCancel()
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		content, err := c.llm.ChatRaw(ctx, "", prompt)
+		cancel()
 		if err == nil {
-			break
+			return content
 		}
-		if attempt < compileRetries-1 {
+		task.AppendLog("[WARN] LLM error: %v\n", err)
+		if attempt < retries-1 {
 			time.Sleep(2 * time.Second)
 		}
 	}
-	if err != nil {
-		task.AppendLog("[COMPILE] LLM error after %d attempts: %v\n", compileRetries, err)
-		return nil
+	return ""
+}
+
+// ========== Post-Compilation Consistency Review ==========
+
+func (c *Compiler) consistencyReview(task *TaskState, articles []OutputFile) []OutputFile {
+	if len(articles) < 2 {
+		return articles
 	}
 
-	// Strip JSON fences if the LLM still wraps it
-	content = stripJSONFence(content)
+	var b strings.Builder
+	b.WriteString("审查以下已编译的知识文章，找出并修复以下问题：\n\n")
+	b.WriteString("1. **内容重叠**：同一主题在不同文章中被重复描述。应保留一篇、其余用[[链接]]替代。\n")
+	b.WriteString("2. **交叉引用缺失**：相关主题之间缺少[[链接]]。\n")
+	b.WriteString("3. **不一致的术语**：同一概念在不同文章中用不同名称。\n\n")
 
-	return &OutputFile{Path: topic.Name + ".md", Content: content}
+	for _, art := range articles {
+		summary := art.Content
+		if len(summary) > 800 {
+			summary = summary[:800] + "..."
+		}
+		b.WriteString(fmt.Sprintf("### %s\n```\n%s\n```\n\n", art.Path, summary))
+	}
+
+	b.WriteString("\n对每个有问题的文章，输出如下JSON（只需修改有问题的文章）：\n")
+	b.WriteString(`{"fixes": [{"path": "article.md", "content": "修正后的完整文章内容"}]}`)
+	b.WriteString("\n\n不要把同一段内容挪来挪去。如果两篇文章讲同一个东西，留下一篇，另一篇加[[链接]]指向它。")
+
+	content := c.chatWithRetry(task, b.String())
+	if content == "" {
+		return articles
+	}
+
+	var result struct {
+		Fixes []OutputFile `json:"fixes"`
+	}
+	if err := json.Unmarshal([]byte(content), &result); err != nil || len(result.Fixes) == 0 {
+		task.AppendLog("[REVIEW] No fixes needed\n")
+		return articles
+	}
+
+	task.AppendLog("[REVIEW] Applied %d fixes\n", len(result.Fixes))
+	fixMap := make(map[string]string)
+	for _, fix := range result.Fixes {
+		fixMap[fix.Path] = fix.Content
+	}
+	for i, art := range articles {
+		if fix, ok := fixMap[art.Path]; ok {
+			articles[i].Content = fix
+		}
+	}
+	return articles
 }
 
 // stripJSONFence removes ```json ... ``` wrapping if present.

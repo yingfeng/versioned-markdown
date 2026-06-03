@@ -55,10 +55,11 @@ func (l *LLMClient) Chat(ctx context.Context, systemPrompt, userPrompt string, t
 	l.logf("[LLM] System Prompt (%d chars):\n%s\n", len(systemPrompt), truncate(systemPrompt, 500))
 	l.logf("[LLM] User Prompt (%d chars):\n%s\n", len(userPrompt), truncate(userPrompt, 500))
 
-	messages := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
-		{Role: openai.ChatMessageRoleUser, Content: userPrompt},
+	var messages []openai.ChatCompletionMessage
+	if systemPrompt != "" {
+		messages = append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleSystem, Content: systemPrompt})
 	}
+	messages = append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: userPrompt})
 
 	req := openai.ChatCompletionRequest{
 		Model:       l.model,
@@ -108,10 +109,11 @@ func (l *LLMClient) Chat(ctx context.Context, systemPrompt, userPrompt string, t
 
 // ChatStream sends a request with streaming response for real-time UI.
 func (l *LLMClient) ChatStream(ctx context.Context, systemPrompt, userPrompt string) error {
-	messages := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
-		{Role: openai.ChatMessageRoleUser, Content: userPrompt},
+	var messages []openai.ChatCompletionMessage
+	if systemPrompt != "" {
+		messages = append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleSystem, Content: systemPrompt})
 	}
+	messages = append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: userPrompt})
 
 	req := openai.ChatCompletionRequest{
 		Model:       l.model,
@@ -153,10 +155,11 @@ func (l *LLMClient) ChatStream(ctx context.Context, systemPrompt, userPrompt str
 func (l *LLMClient) ChatRaw(ctx context.Context, systemPrompt, userPrompt string) (string, error) {
 	l.logf("[LLM] ChatRaw — system(%d chars), user(%d chars)\n", len(systemPrompt), len(userPrompt))
 
-	messages := []openai.ChatCompletionMessage{
-		{Role: openai.ChatMessageRoleSystem, Content: systemPrompt},
-		{Role: openai.ChatMessageRoleUser, Content: userPrompt},
+	var messages []openai.ChatCompletionMessage
+	if systemPrompt != "" {
+		messages = append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleSystem, Content: systemPrompt})
 	}
+	messages = append(messages, openai.ChatCompletionMessage{Role: openai.ChatMessageRoleUser, Content: userPrompt})
 
 	req := openai.ChatCompletionRequest{
 		Model:       l.model,
