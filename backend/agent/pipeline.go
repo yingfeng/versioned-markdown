@@ -213,13 +213,22 @@ func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 
 	// P3: Compile each topic article (P0: passes full topic context for cross-linking)
 	var allOutputs []OutputFile
+	compileStart := time.Now()
 	for i, topic := range topics {
+		tStart := time.Now()
 		article := c.compilePhase(task, topic, files, topics, outputDir)
+		elapsed := time.Since(tStart).Round(time.Second)
 		if article != nil {
 			allOutputs = append(allOutputs, *article)
 		}
-		task.AppendLog("[COMPILE] Topic %d/%d: '%s'\n", i+1, len(topics), topic.Name)
+		remaining := len(topics) - i - 1
+		avgTime := time.Since(compileStart) / time.Duration(i+1)
+		eta := avgTime * time.Duration(remaining)
+		task.AppendLog("[COMPILE] Topic %d/%d: '%s' (%v, ETA %v)\n",
+			i+1, len(topics), topic.Name, elapsed, eta.Round(time.Second))
 	}
+	compileTotal := time.Since(compileStart).Round(time.Second)
+	task.AppendLog("[COMPILE] All %d topics compiled in %v\n", len(topics), compileTotal)
 
 	// P4: Concept discovery — find cross-topic patterns
 	concepts := c.conceptPhase(task, topics, allOutputs)
@@ -334,7 +343,9 @@ func (c *Compiler) extractKeywords(task *TaskState, files []FileNode) {
 
 		systemMsg := "你是一个文档分析专家。对每个文件提取3-5个最能代表内容的关键词。"
 
-		content, err := c.llm.ChatRaw(context.Background(), systemMsg, b.String())
+		kwCtx, kwCancel := context.WithTimeout(context.Background(), 90*time.Second)
+		content, err := c.llm.ChatRaw(kwCtx, systemMsg, b.String())
+		kwCancel()
 		if err != nil {
 			task.AppendLog("[EXTRACT] Batch %d error: %v\n", start/batchSize, err)
 			continue
@@ -381,22 +392,75 @@ func (c *Compiler) extractKeywords(task *TaskState, files []FileNode) {
 	}
 }
 
-// ========== P1: Optimized Scan ==========
+// ========== P1+P4: Batch Scan (handles large workspaces) ==========
+
+const scanBatchSize = 25
 
 func (c *Compiler) scanPhase(task *TaskState, files []FileNode, skills []SkillDef, instructions string) []TopicInfo {
 	task.AppendLog("[SCAN] Analyzing %d files to discover topics...\n", len(files))
 
+	if len(files) <= scanBatchSize {
+		return c.scanBatch(task, files, instructions)
+	}
+
+	// Large workspace: scan in parallel sub-batches, then merge
+	task.AppendLog("[SCAN] Large workspace: scanning %d files in parallel batches of %d\n", len(files), scanBatchSize)
+
+	type batchResult struct {
+		index  int
+		topics []TopicInfo
+	}
+
+	numBatches := (len(files) + scanBatchSize - 1) / scanBatchSize
+	resultCh := make(chan batchResult, numBatches)
+
+	for start := 0; start < len(files); start += scanBatchSize {
+		end := start + scanBatchSize
+		if end > len(files) {
+			end = len(files)
+		}
+		batch := files[start:end]
+		batchNum := start / scanBatchSize
+
+		go func(idx int, bf []FileNode) {
+			task.AppendLog("[SCAN] Sub-agent %d: scanning files %d-%d...\n", idx+1, idx*scanBatchSize+1, idx*scanBatchSize+len(bf))
+			topics := c.scanBatch(task, bf, instructions)
+			resultCh <- batchResult{index: idx, topics: topics}
+		}(batchNum, batch)
+	}
+
+	var allCandidates []TopicInfo
+	for i := 0; i < numBatches; i++ {
+		res := <-resultCh
+		if len(res.topics) > 0 {
+			task.AppendLog("[SCAN] Sub-agent %d: found %d candidate topics\n", res.index+1, len(res.topics))
+			allCandidates = append(allCandidates, res.topics...)
+		} else {
+			task.AppendLog("[SCAN] Sub-agent %d: no topics found\n", res.index+1)
+		}
+	}
+	close(resultCh)
+
+	if len(allCandidates) == 0 {
+		task.AppendLog("[SCAN] No candidates from batches, using fallback\n")
+		return c.fallbackTopics(files)
+	}
+
+	// Merge candidates: send all candidate topics to LLM for dedup + consolidation
+	task.AppendLog("[SCAN] Merging %d candidate topics...\n", len(allCandidates))
+	return c.mergeTopics(task, allCandidates, instructions)
+}
+
+// scanBatch scans a single batch of files for topics with timeout and retry.
+func (c *Compiler) scanBatch(task *TaskState, files []FileNode, instructions string) []TopicInfo {
 	var b strings.Builder
-	b.WriteString("你是一个信息架构师。分析以下源文件，发现独立的知识主题。\n\n")
-
-	b.WriteString("判断规则：\n")
-	b.WriteString("1. 两个文件共享50%+的关键词 → 归为同一主题\n")
+	b.WriteString("分析以下源文件，发现其中的知识主题。\n\n")
+	b.WriteString("规则：\n")
+	b.WriteString("1. 共享关键词的文件归为同一主题\n")
 	b.WriteString("2. 一个文件可能属于多个主题\n")
-	b.WriteString("3. 每个主题应代表用户可以独立阅读的知识单元\n")
-	b.WriteString("4. 避免创建\"杂项\"或\"其他\"主题\n")
-	b.WriteString("5. 主题名用 kebab-case\n\n")
+	b.WriteString("3. 主题名用 kebab-case\n\n")
 
-	b.WriteString("文件列表（含标题、关键词、摘要）：\n\n")
+	b.WriteString("文件列表：\n\n")
 	for _, f := range files {
 		kw := strings.Join(f.Keywords, ", ")
 		if kw == "" {
@@ -407,8 +471,7 @@ func (c *Compiler) scanPhase(task *TaskState, files []FileNode, skills []SkillDe
 			summary = summary[:500] + "..."
 		}
 		b.WriteString(fmt.Sprintf("### %s\n", f.Path))
-		b.WriteString(fmt.Sprintf("- 标题: %s\n", f.Title))
-		b.WriteString(fmt.Sprintf("- 关键词: %s\n", kw))
+		b.WriteString(fmt.Sprintf("- 标题: %s | 关键词: %s\n", f.Title, kw))
 		b.WriteString(fmt.Sprintf("- 摘要:\n```\n%s\n```\n\n", summary))
 	}
 
@@ -416,26 +479,93 @@ func (c *Compiler) scanPhase(task *TaskState, files []FileNode, skills []SkillDe
 		b.WriteString(fmt.Sprintf("## 用户指令\n\n%s\n", instructions))
 	}
 
-	b.WriteString("\n输出JSON格式：\n")
-	b.WriteString(`{"topics": [{"name": "topic-slug", "source_paths": ["file1.md"], "description": "简要描述"}]}`)
+	b.WriteString(`输出JSON: {"topics": [{"name": "slug", "source_paths": ["file.md"], "description": "描述"}]}`)
 
-	b.WriteString("\n\n示例：\n")
-	b.WriteString(`{"topics": [{"name": "deep-learning", "source_paths": ["1.md","2.md"], "description": "深度学习相关概念与技术"}]}`)
+	systemMsg := "你是一个信息架构师。分析关键词和摘要来发现知识主题。"
 
-	systemMsg := "你是一个信息架构师。分析文件的关键词、标题和摘要来发现知识主题。主题应该有意义且互不重叠。"
+	// Call with timeout and retry
+	const batchTimeout = 90 * time.Second
+	const maxRetries = 2
 
-	content, err := c.llm.ChatRaw(context.Background(), systemMsg, b.String())
+	var content string
+	var err error
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		if attempt > 0 {
+			task.AppendLog("[RETRY] scanBatch attempt %d\n", attempt+1)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), batchTimeout)
+		content, err = c.llm.ChatRaw(ctx, systemMsg, b.String())
+		cancel()
+		if err == nil {
+			break
+		}
+		if attempt < maxRetries-1 {
+			time.Sleep(2 * time.Second)
+		}
+	}
 	if err != nil {
-		task.AppendLog("[SCAN] LLM error: %v, using fallback\n", err)
-		return c.fallbackTopics(files)
+		task.AppendLog("[SCAN] Batch failed after %d attempts: %v\n", maxRetries, err)
+		return nil
+	}
+
+	var result struct {
+		Topics []TopicInfo `json:"topics"`
+	}
+	if err := json.Unmarshal([]byte(content), &result); err != nil {
+		return nil
+	}
+	return result.Topics
+}
+
+// mergeTopics merges candidate topics from multiple batches.
+func (c *Compiler) mergeTopics(task *TaskState, candidates []TopicInfo, instructions string) []TopicInfo {
+	var b strings.Builder
+	b.WriteString("以下是多个批次中发现的主题候选。合并去重：\n\n")
+	b.WriteString("规则：\n")
+	b.WriteString("1. 名称相似的主题合并为一个\n")
+	b.WriteString("2. 同一个文件在不同批次中出现 → 归到合并后的主题\n")
+	b.WriteString("3. source_paths 汇总所有关联文件\n\n")
+
+	for i, t := range candidates {
+		b.WriteString(fmt.Sprintf("%d. 主题「%s」: %s (文件: %s)\n",
+			i+1, t.Name, t.Description, strings.Join(t.SourcePaths, ", ")))
+	}
+
+	if instructions != "" {
+		b.WriteString(fmt.Sprintf("\n用户指令: %s\n", instructions))
+	}
+
+	b.WriteString(`\n输出JSON: {"topics": [{"name": "merged-slug", "source_paths": ["file.md"], "description": "合并后描述"}]}`)
+
+	systemMsg := "你是一个信息架构师。合并去重主题候选列表。"
+
+	mergeCtx, mergeCancel := context.WithTimeout(context.Background(), 90*time.Second)
+	content, err := c.llm.ChatRaw(mergeCtx, systemMsg, b.String())
+	mergeCancel()
+	if err != nil {
+		task.AppendLog("[MERGE] LLM error: %v, using candidates directly\n", err)
+		return candidates
 	}
 
 	var result struct {
 		Topics []TopicInfo `json:"topics"`
 	}
 	if err := json.Unmarshal([]byte(content), &result); err != nil || len(result.Topics) == 0 {
-		task.AppendLog("[SCAN] Parse error, using fallback\n")
-		return c.fallbackTopics(files)
+		task.AppendLog("[MERGE] Parse error, using candidates directly\n")
+		return candidates
+	}
+
+	// Preserve source_paths from candidates for any merged topic that lost them
+	candidateMap := make(map[string][]string)
+	for _, c := range candidates {
+		candidateMap[c.Name] = c.SourcePaths
+	}
+	for i := range result.Topics {
+		if len(result.Topics[i].SourcePaths) == 0 {
+			if paths, ok := candidateMap[result.Topics[i].Name]; ok {
+				result.Topics[i].SourcePaths = paths
+			}
+		}
 	}
 
 	return result.Topics
@@ -503,10 +633,27 @@ func (c *Compiler) compilePhase(task *TaskState, topic TopicInfo, allFiles []Fil
 
 文件将保存为` + topic.Name + `.md。直接输出markdown内容，不要包含JSON。`
 
-	ctx := context.Background()
-	content, err := c.llm.ChatRaw(ctx, systemMsg, b.String())
+	// Compile with timeout and retry
+	const compileTimeout = 120 * time.Second
+	const compileRetries = 2
+	var content string
+	var err error
+	for attempt := 0; attempt < compileRetries; attempt++ {
+		if attempt > 0 {
+			task.AppendLog("[RETRY] compilePhase attempt %d\n", attempt+1)
+		}
+		compileCtx, compileCancel := context.WithTimeout(context.Background(), compileTimeout)
+		content, err = c.llm.ChatRaw(compileCtx, systemMsg, b.String())
+		compileCancel()
+		if err == nil {
+			break
+		}
+		if attempt < compileRetries-1 {
+			time.Sleep(2 * time.Second)
+		}
+	}
 	if err != nil {
-		task.AppendLog("[COMPILE] LLM error: %v\n", err)
+		task.AppendLog("[COMPILE] LLM error after %d attempts: %v\n", compileRetries, err)
 		return nil
 	}
 
