@@ -2,7 +2,7 @@
  * GraphView — entity-level knowledge graph.
  * Styled after vector-graph-rag: rounded rect nodes, bezier edges with labels.
  */
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ReactFlow,
   Background,
@@ -20,6 +20,7 @@ import {
   type Edge,
   type NodeProps,
   type EdgeProps,
+  type ReactFlowInstance,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import type { GraphNode, GraphEdge } from '../lib/graph/wiki-graph'
@@ -170,8 +171,20 @@ function layoutGraph(srcNodes: GraphNode[], srcEdges: GraphEdge[]) {
 // ── Component ──
 
 export default function GraphView({ nodes: srcNodes, edges: srcEdges, onNavigate }: Props) {
+  const rfRef = useRef<ReactFlowInstance>(null)
+  const onInit = useCallback((instance: ReactFlowInstance) => {
+    rfRef.current = instance
+    console.log('[GraphView] initializing')
+    setTimeout(() => instance.fitView({ padding: 0.3 }), 200)
+  }, [])
+
   const { flowNodes: initialNodes, flowEdges: initialEdges } = useMemo(
-    () => layoutGraph(srcNodes, srcEdges),
+    () => {
+      const result = layoutGraph(srcNodes, srcEdges)
+      console.log('[GraphView] layout:', result.flowNodes.length, 'nodes at positions:',
+        result.flowNodes.map(n => `${n.id}@(${Math.round(n.position.x)},${Math.round(n.position.y)})`))
+      return result
+    },
     [srcNodes, srcEdges],
   )
 
@@ -181,9 +194,16 @@ export default function GraphView({ nodes: srcNodes, edges: srcEdges, onNavigate
 
   useEffect(() => {
     const { flowNodes: n, flowEdges: e } = layoutGraph(srcNodes, srcEdges)
+    console.log('[GraphView] relayout:', n.length, 'nodes')
     setFlowNodes(n)
     setFlowEdges(e)
   }, [srcNodes, srcEdges, setFlowNodes, setFlowEdges])
+
+  useEffect(() => {
+    if (rfRef.current) {
+      setTimeout(() => rfRef.current.fitView({ padding: 0.3 }), 100)
+    }
+  }, [flowNodes])
 
   const onNodeClick = useCallback((_: React.MouseEvent, node: Node) => {
     const sourcePages = node.data.sourcePages as { fileId: string; label: string }[] | undefined
@@ -227,6 +247,7 @@ export default function GraphView({ nodes: srcNodes, edges: srcEdges, onNavigate
       <ReactFlow
         nodes={flowNodes}
         edges={flowEdges}
+        onInit={onInit}
         onNodesChange={onNodesChange}
         onEdgesChange={onEdgesChange}
         onNodeClick={onNodeClick}

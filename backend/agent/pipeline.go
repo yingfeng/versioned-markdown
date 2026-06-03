@@ -40,7 +40,6 @@ type OutputFile struct {
 }
 
 // LLMResult contains the structured output from a single LLM call.
-// Used by model.go for parsing multi-file JSON responses.
 type LLMResult struct {
 	Files []OutputFile `json:"files"`
 }
@@ -51,6 +50,9 @@ type FileNode struct {
 	Name    string
 	Path    string
 	Content string
+	Summary string
+	Title   string
+	Keywords []string
 }
 
 // SkillDef represents a loaded skill definition.
@@ -64,6 +66,24 @@ type TopicInfo struct {
 	Name        string   `json:"name"`
 	SourcePaths []string `json:"source_paths"`
 	Description string   `json:"description"`
+}
+
+// ConceptInfo from concept discovery phase.
+type ConceptInfo struct {
+	Name        string   `json:"name"`
+	Slug        string   `json:"slug"`
+	Description string   `json:"description"`
+	Topics      []string `json:"topics"`
+}
+
+// QualityReport from review phase.
+type QualityReport struct {
+	Passed           bool     `json:"passed"`
+	Issues           []string `json:"issues"`
+	ArticleCount     int      `json:"article_count"`
+	TotalLinks       int      `json:"total_links"`
+	OrphanArticles   []string `json:"orphan_articles"`
+	LowCoverageCount int      `json:"low_coverage_count"`
 }
 
 // TaskState tracks a running/tracked compilation task.
@@ -103,7 +123,7 @@ func (t *TaskState) GetLog() string {
 	return t.Log
 }
 
-// Compiler is the knowledge compilation agent with multi-phase execution.
+// Compiler is the knowledge compilation agent.
 type Compiler struct {
 	fileSvc  *service.FileService
 	llm      *LLMClient
@@ -112,7 +132,6 @@ type Compiler struct {
 	entityID func() string
 }
 
-// NewCompiler creates a new Compiler instance.
 func NewCompiler(fileSvc *service.FileService, llm *LLMClient) *Compiler {
 	return &Compiler{
 		fileSvc:  fileSvc,
@@ -122,7 +141,6 @@ func NewCompiler(fileSvc *service.FileService, llm *LLMClient) *Compiler {
 	}
 }
 
-// StartCompile creates a compilation task and starts it in background.
 func (c *Compiler) StartCompile(ctx context.Context, input *CompileInput) (*TaskState, error) {
 	taskID := c.entityID()
 	task := &TaskState{
@@ -138,14 +156,12 @@ func (c *Compiler) StartCompile(ctx context.Context, input *CompileInput) (*Task
 	return task, nil
 }
 
-// GetTask returns the task state by ID.
 func (c *Compiler) GetTask(taskID string) *TaskState {
 	c.tasksMu.RLock()
 	defer c.tasksMu.RUnlock()
 	return c.tasks[taskID]
 }
 
-// ListTasks returns all tracked tasks.
 func (c *Compiler) ListTasks() []*TaskState {
 	c.tasksMu.RLock()
 	defer c.tasksMu.RUnlock()
@@ -156,7 +172,7 @@ func (c *Compiler) ListTasks() []*TaskState {
 	return result
 }
 
-// ========== Multi-Phase Compilation Pipeline ==========
+// ========== Main Pipeline ==========
 
 func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 	task.SetStatus("running")
@@ -176,41 +192,50 @@ func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 		outputDir = "synthesis"
 	}
 
-	// Phase 1: Load files + load skills
+	// P4: Batch-load files (if >20, process in batches for keyword extraction)
 	files, skills := c.loadPhase(task, input)
 	if len(files) == 0 {
 		return
 	}
 
-	// Phase 2: Scan source files to discover topics (small prompt, just summaries)
+	// P1: Keyword extraction for each file
+	c.extractKeywords(task, files)
+
+	// P2: Discover topics (uses keyword-enriched file info)
 	topics := c.scanPhase(task, files, skills, input.Instructions)
 	if len(topics) == 0 {
 		return
 	}
-
 	task.AppendLog("\n[SCAN] Discovered %d topics:\n", len(topics))
 	for _, t := range topics {
-		task.AppendLog("  - %s (%d sources)\n", t.Name, len(t.SourcePaths))
+		task.AppendLog("  - %s (%d sources): %s\n", t.Name, len(t.SourcePaths), t.Description)
 	}
 
-	// Phase 3: Compile each topic article (one LLM call per topic)
+	// P3: Compile each topic article (P0: passes full topic context for cross-linking)
 	var allOutputs []OutputFile
 	for i, topic := range topics {
-		article := c.compilePhase(task, topic, files, outputDir)
+		article := c.compilePhase(task, topic, files, topics, outputDir)
 		if article != nil {
 			allOutputs = append(allOutputs, *article)
 		}
-		task.AppendLog("[COMPILE] Topic %d/%d: '%s' → %s\n", i+1, len(topics), topic.Name, article.Path)
+		task.AppendLog("[COMPILE] Topic %d/%d: '%s'\n", i+1, len(topics), topic.Name)
 	}
 
-	// Phase 4: Generate INDEX.md + log.md
-	index := c.generateIndex(task, topics, len(files), outputDir)
-	logFile := c.generateLog(task, topics, len(files), outputDir)
-	allOutputs = append(allOutputs, index, logFile)
+	// P4: Concept discovery — find cross-topic patterns
+	concepts := c.conceptPhase(task, topics, allOutputs)
+	for _, concept := range concepts {
+		allOutputs = append(allOutputs, concept)
+	}
 
-	task.AppendLog("\n[OUTPUT] Total files to create: %d\n", len(allOutputs))
+	// P5: INDEX.md + log.md
+	allOutputs = append(allOutputs,
+		c.generateIndex(task, topics, len(files), outputDir),
+		c.generateLog(task, topics, len(files), outputDir))
 
-	// Phase 5: Write output files
+	// P6: Quality review (P3)
+	allOutputs = c.qualityReview(task, topics, allOutputs)
+
+	// Write + commit
 	created, outputWkspID, err := c.writeOutputFiles(task, input, outputDir, allOutputs)
 	if err != nil {
 		task.AppendLog("[ERROR] Write output: %v\n", err)
@@ -221,7 +246,6 @@ func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 	}
 	task.AppendLog("[OUTPUT] Created %d files\n", len(created))
 
-	// Phase 6: Commit
 	commitID, err := c.commit(input, outputWkspID)
 	if err != nil {
 		task.AppendLog("[COMMIT] Warning: %v\n", err)
@@ -230,15 +254,13 @@ func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 	}
 
 	task.AppendLog("[TASK] ===== Complete =====\n")
-	task.Result = &CompileResult{
-		FilesCreated: len(created),
-		CommitID:     commitID,
-	}
+	task.Result = &CompileResult{FilesCreated: len(created), CommitID: commitID}
 	task.SetStatus("success")
 	task.FinishedAt = time.Now()
 }
 
-// loadPhase loads workspace files and skills.
+// ========== P4: Batch Loading ==========
+
 func (c *Compiler) loadPhase(task *TaskState, input *CompileInput) ([]FileNode, []SkillDef) {
 	task.AppendLog("[LOAD] Loading workspace files...\n")
 	files, err := c.loadWorkspaceFiles(input.WorkspaceID)
@@ -251,6 +273,11 @@ func (c *Compiler) loadPhase(task *TaskState, input *CompileInput) ([]FileNode, 
 	}
 	task.AppendLog("[LOAD] %d files loaded\n", len(files))
 
+	// P4: If >20 files, show batching info
+	if len(files) > 20 {
+		task.AppendLog("[LOAD] Large workspace (%d files), using batch processing\n", len(files))
+	}
+
 	task.AppendLog("[LOAD] Loading skills...\n")
 	skills, err := c.loadSkills(input.WorkspaceID, input.SkillRefs)
 	if err != nil {
@@ -260,36 +287,146 @@ func (c *Compiler) loadPhase(task *TaskState, input *CompileInput) ([]FileNode, 
 	return files, skills
 }
 
-// scanPhase sends file summaries to discover topics.
-func (c *Compiler) scanPhase(task *TaskState, files []FileNode, skills []SkillDef, instructions string) []TopicInfo {
-	task.AppendLog("[SCAN] Analyzing %d source files to discover topics...\n", len(files))
+// ========== P1: Keyword Extraction ==========
 
-	// Build a compact summary prompt (just paths + first 300 chars)
-	var b strings.Builder
-	b.WriteString("以下是要编译的源文件列表。请分析它们并发现主题。\n\n")
-	for _, f := range files {
-		summary := f.Content
-		if len(summary) > 300 {
-			summary = summary[:300] + "..."
+func (c *Compiler) extractKeywords(task *TaskState, files []FileNode) {
+	task.AppendLog("[EXTRACT] Extracting keywords from %d files...\n", len(files))
+
+	// P4: Batch processing — process files in groups of 10
+	batchSize := 10
+	for start := 0; start < len(files); start += batchSize {
+		end := start + batchSize
+		if end > len(files) {
+			end = len(files)
 		}
-		b.WriteString(fmt.Sprintf("### %s\n```\n%s\n```\n\n", f.Path, summary))
+		batch := files[start:end]
+
+		var b strings.Builder
+		b.WriteString("从以下文件中提取关键词（每个文件3-5个关键词）。输出JSON格式：\n")
+
+		type keywordReq struct {
+			Path     string `json:"path"`
+			Title    string `json:"title"`
+			First300 string `json:"first_300_chars"`
+		}
+		var reqs []keywordReq
+		for _, f := range batch {
+			summary := f.Content
+			if len(summary) > 300 {
+				summary = summary[:300]
+			}
+			title := ""
+			for _, line := range strings.Split(f.Content, "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "# ") {
+					title = strings.TrimPrefix(strings.TrimSpace(line), "# ")
+					break
+				}
+			}
+			reqs = append(reqs, keywordReq{
+				Path:     f.Path,
+				Title:    title,
+				First300: summary,
+			})
+		}
+		data, _ := json.Marshal(reqs)
+		b.Write(data)
+		b.WriteString("\n\n输出格式: [{\"path\": \"file.md\", \"keywords\": [\"kw1\",\"kw2\"]}]")
+
+		systemMsg := "你是一个文档分析专家。对每个文件提取3-5个最能代表内容的关键词。"
+
+		content, err := c.llm.ChatRaw(context.Background(), systemMsg, b.String())
+		if err != nil {
+			task.AppendLog("[EXTRACT] Batch %d error: %v\n", start/batchSize, err)
+			continue
+		}
+
+		var results []struct {
+			Path     string   `json:"path"`
+			Keywords []string `json:"keywords"`
+		}
+		if err := json.Unmarshal([]byte(content), &results); err != nil {
+			task.AppendLog("[EXTRACT] Parse error for batch %d\n", start/batchSize)
+			continue
+		}
+
+		kwMap := make(map[string][]string)
+		for _, r := range results {
+			kwMap[r.Path] = r.Keywords
+		}
+		for i := range files {
+			if kws, ok := kwMap[files[i].Path]; ok {
+				files[i].Keywords = kws
+			}
+		}
+		task.AppendLog("[EXTRACT] Batch %d: %d files processed\n", start/batchSize+1, len(results))
+	}
+
+	// Fill in titles and summaries for files where we can
+	for i := range files {
+		if files[i].Summary == "" {
+			s := files[i].Content
+			if len(s) > 500 {
+				s = s[:500]
+			}
+			files[i].Summary = s
+		}
+		if files[i].Title == "" {
+			for _, line := range strings.Split(files[i].Content, "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "# ") {
+					files[i].Title = strings.TrimPrefix(strings.TrimSpace(line), "# ")
+					break
+				}
+			}
+		}
+	}
+}
+
+// ========== P1: Optimized Scan ==========
+
+func (c *Compiler) scanPhase(task *TaskState, files []FileNode, skills []SkillDef, instructions string) []TopicInfo {
+	task.AppendLog("[SCAN] Analyzing %d files to discover topics...\n", len(files))
+
+	var b strings.Builder
+	b.WriteString("你是一个信息架构师。分析以下源文件，发现独立的知识主题。\n\n")
+
+	b.WriteString("判断规则：\n")
+	b.WriteString("1. 两个文件共享50%+的关键词 → 归为同一主题\n")
+	b.WriteString("2. 一个文件可能属于多个主题\n")
+	b.WriteString("3. 每个主题应代表用户可以独立阅读的知识单元\n")
+	b.WriteString("4. 避免创建\"杂项\"或\"其他\"主题\n")
+	b.WriteString("5. 主题名用 kebab-case\n\n")
+
+	b.WriteString("文件列表（含标题、关键词、摘要）：\n\n")
+	for _, f := range files {
+		kw := strings.Join(f.Keywords, ", ")
+		if kw == "" {
+			kw = "(未提取)"
+		}
+		summary := f.Content
+		if len(summary) > 500 {
+			summary = summary[:500] + "..."
+		}
+		b.WriteString(fmt.Sprintf("### %s\n", f.Path))
+		b.WriteString(fmt.Sprintf("- 标题: %s\n", f.Title))
+		b.WriteString(fmt.Sprintf("- 关键词: %s\n", kw))
+		b.WriteString(fmt.Sprintf("- 摘要:\n```\n%s\n```\n\n", summary))
 	}
 
 	if instructions != "" {
 		b.WriteString(fmt.Sprintf("## 用户指令\n\n%s\n", instructions))
 	}
 
-	b.WriteString("\n请以 JSON 格式输出你发现的主题列表：\n")
+	b.WriteString("\n输出JSON格式：\n")
 	b.WriteString(`{"topics": [{"name": "topic-slug", "source_paths": ["file1.md"], "description": "简要描述"}]}`)
 
-	systemMsg := "你是一个知识编译专家。分析下面的源文件摘要，发现其中的独立主题。\n每个主题应该是一组相关的文件集合。主题名用 kebab-case。"
+	b.WriteString("\n\n示例：\n")
+	b.WriteString(`{"topics": [{"name": "deep-learning", "source_paths": ["1.md","2.md"], "description": "深度学习相关概念与技术"}]}`)
 
-	ctx := context.Background()
-	task.AppendLog("[SCAN] Calling LLM with %d file summaries...\n", len(files))
-	content, err := c.llm.ChatRaw(ctx, systemMsg, b.String())
+	systemMsg := "你是一个信息架构师。分析文件的关键词、标题和摘要来发现知识主题。主题应该有意义且互不重叠。"
+
+	content, err := c.llm.ChatRaw(context.Background(), systemMsg, b.String())
 	if err != nil {
-		task.AppendLog("[SCAN] LLM error: %v\n", err)
-		task.AppendLog("[SCAN] Falling back: treating entire workspace as one topic\n")
+		task.AppendLog("[SCAN] LLM error: %v, using fallback\n", err)
 		return c.fallbackTopics(files)
 	}
 
@@ -297,7 +434,7 @@ func (c *Compiler) scanPhase(task *TaskState, files []FileNode, skills []SkillDe
 		Topics []TopicInfo `json:"topics"`
 	}
 	if err := json.Unmarshal([]byte(content), &result); err != nil || len(result.Topics) == 0 {
-		task.AppendLog("[SCAN] Could not parse topics from LLM response, using fallback\n")
+		task.AppendLog("[SCAN] Parse error, using fallback\n")
 		return c.fallbackTopics(files)
 	}
 
@@ -305,37 +442,36 @@ func (c *Compiler) scanPhase(task *TaskState, files []FileNode, skills []SkillDe
 }
 
 func (c *Compiler) fallbackTopics(files []FileNode) []TopicInfo {
-	// Group by directory prefix
 	groups := make(map[string][]string)
 	for _, f := range files {
-		dir := ""
+		dir := "root"
 		if idx := strings.LastIndex(f.Path, "/"); idx > 0 {
 			dir = f.Path[:idx]
-		} else {
-			dir = "root"
 		}
 		groups[dir] = append(groups[dir], f.Path)
 	}
 	var topics []TopicInfo
 	for dir, paths := range groups {
 		name := strings.ReplaceAll(dir, "/", "-")
-		if name == "" {
-			name = "topic"
-		}
-		topics = append(topics, TopicInfo{
-			Name:        name,
-			SourcePaths: paths,
-			Description: fmt.Sprintf("Files in %s", dir),
-		})
+		topics = append(topics, TopicInfo{Name: name, SourcePaths: paths, Description: "Files in " + dir})
 	}
 	return topics
 }
 
-// compilePhase compiles a single topic article.
-func (c *Compiler) compilePhase(task *TaskState, topic TopicInfo, allFiles []FileNode, outputDir string) *OutputFile {
-	task.AppendLog("[COMPILE] Compiling topic '%s' (%d sources)...\n", topic.Name, len(topic.SourcePaths))
+// ========== P0: Compile with Cross-Topic Context ==========
 
-	// Collect relevant files for this topic
+func (c *Compiler) compilePhase(task *TaskState, topic TopicInfo, allFiles []FileNode, allTopics []TopicInfo, outputDir string) *OutputFile {
+	task.AppendLog("[COMPILE] Topic '%s' (%d sources)...\n", topic.Name, len(topic.SourcePaths))
+
+	// Build other-topics context for cross-linking
+	var otherCtx strings.Builder
+	otherCtx.WriteString("其他已发现主题供交叉引用：\n")
+	for _, t := range allTopics {
+		if t.Name != topic.Name {
+			otherCtx.WriteString(fmt.Sprintf("- [[%s]]: %s\n", t.Name, t.Description))
+		}
+	}
+
 	var relevantFiles []FileNode
 	topicPaths := make(map[string]bool)
 	for _, p := range topic.SourcePaths {
@@ -347,23 +483,25 @@ func (c *Compiler) compilePhase(task *TaskState, topic TopicInfo, allFiles []Fil
 		}
 	}
 
-	// Build compact prompt with full content of relevant files
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("编译主题「%s」的知识文章。\n\n", topic.Name))
+	b.WriteString(fmt.Sprintf("编译主题「%s」的知识文章。\n\n", topic.Description))
+	b.WriteString(otherCtx.String())
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("主题描述：%s\n\n", topic.Description))
 	for _, f := range relevantFiles {
 		b.WriteString(fmt.Sprintf("### %s\n```\n%s\n```\n\n", f.Path, f.Content))
 	}
 
-	b.WriteString(fmt.Sprintf("输出到文件: %s.md\n", topic.Name))
-	b.WriteString("\n输出 JSON 格式: " + `{"path": "topic-name.md", "content": "# Title\n\n..."}`)
+	systemMsg := `你正在编译一篇知识文章。只输出纯 Markdown，不要 JSON 包裹。
 
-	systemMsg := `你正在编译一篇知识文章。严格遵循以下要求：
+要求:
+1. 合成多个源文件的信息，不要照搬一个源
+2. 用自己的语言重新组织
+3. 正文必须用 [[OtherArticle]] 交叉引用其他主题
+4. 每个小节末尾标记: [coverage: high/medium/low]
+5. 文章结构: # 标题 → ## 概要 → ## 内容 → ## 资料来源
 
-1. 合成多个源文件的信息，不要只照搬一个源
-2. 用自己的语言重新组织内容
-3. 正文中用 [[OtherArticle]] 格式交叉引用相关主题
-4. 标记覆盖度: [coverage: high/medium/low]
-5. 输出纯 JSON`
+文件将保存为` + topic.Name + `.md。直接输出markdown内容，不要包含JSON。`
 
 	ctx := context.Background()
 	content, err := c.llm.ChatRaw(ctx, systemMsg, b.String())
@@ -372,58 +510,260 @@ func (c *Compiler) compilePhase(task *TaskState, topic TopicInfo, allFiles []Fil
 		return nil
 	}
 
-	var of OutputFile
-	if err := json.Unmarshal([]byte(content), &of); err != nil || of.Path == "" || of.Content == "" {
-		// Fallback: wrap raw content
-		return &OutputFile{
-			Path:    topic.Name + ".md",
-			Content: content,
-		}
-	}
-	return &of
+	// Strip JSON fences if the LLM still wraps it
+	content = stripJSONFence(content)
+
+	return &OutputFile{Path: topic.Name + ".md", Content: content}
 }
 
-// generateIndex creates INDEX.md.
+// stripJSONFence removes ```json ... ``` wrapping if present.
+func stripJSONFence(s string) string {
+	s = strings.TrimSpace(s)
+	if strings.HasPrefix(s, "```") {
+		lines := strings.SplitN(s, "\n", 2)
+		if len(lines) == 2 {
+			s = lines[1]
+		}
+	}
+	if strings.HasSuffix(s, "```") {
+		idx := strings.LastIndex(s, "```")
+		if idx >= 0 {
+			s = s[:idx]
+		}
+	}
+	return strings.TrimSpace(s)
+}
+
+// ========== P2: Concept Discovery ==========
+
+func (c *Compiler) conceptPhase(task *TaskState, topics []TopicInfo, articles []OutputFile) []OutputFile {
+	if len(articles) < 3 {
+		return nil // Need at least 3 articles to find cross-cutting patterns
+	}
+
+	task.AppendLog("[CONCEPT] Analyzing %d articles for cross-topic concepts...\n", len(articles))
+
+	var b strings.Builder
+	b.WriteString("分析以下已编译的知识文章，发现跨主题的概念和模式。\n\n")
+	b.WriteString("概念是指出现在3个以上主题中的跨领域模式，例如：\n")
+	b.WriteString("- 多个主题共同使用的架构模式\n")
+	b.WriteString("- 跨主题的决策原则\n")
+	b.WriteString("- 重复出现的工程模式\n\n")
+
+	b.WriteString("主题列表：\n")
+	for _, t := range topics {
+		b.WriteString(fmt.Sprintf("- [[%s]]: %s\n", t.Name, t.Description))
+	}
+	b.WriteString("\n文章摘要：\n")
+	for _, a := range articles {
+		summary := a.Content
+		if len(summary) > 300 {
+			summary = summary[:300]
+		}
+		b.WriteString(fmt.Sprintf("### %s\n```\n%s\n```\n\n", a.Path, summary))
+	}
+
+	b.WriteString("\n输出JSON格式:\n")
+	b.WriteString(`{"concepts": [{"name": "概念名", "slug": "concept-slug", "description": "描述", "topics": ["topic1","topic2"]}]}`)
+
+	systemMsg := "你是一个知识发现专家。找出跨主题的共现模式。只在确实存在3个以上相关性时创建概念。"
+
+	content, err := c.llm.ChatRaw(context.Background(), systemMsg, b.String())
+	if err != nil {
+		task.AppendLog("[CONCEPT] LLM error: %v\n", err)
+		return nil
+	}
+
+	var result struct {
+		Concepts []struct {
+			Name        string   `json:"name"`
+			Slug        string   `json:"slug"`
+			Description string   `json:"description"`
+			Topics      []string `json:"topics"`
+		} `json:"concepts"`
+	}
+	if err := json.Unmarshal([]byte(content), &result); err != nil || len(result.Concepts) == 0 {
+		task.AppendLog("[CONCEPT] No cross-topic patterns found\n")
+		return nil
+	}
+
+	task.AppendLog("[CONCEPT] Found %d concepts:\n", len(result.Concepts))
+	var outputs []OutputFile
+	for _, cpt := range result.Concepts {
+		task.AppendLog("  - [[%s]]: %s\n", cpt.Slug, cpt.Description)
+
+		body := fmt.Sprintf("# %s\n\n## 概述\n%s\n\n## 关联主题\n", cpt.Name, cpt.Description)
+		for _, t := range cpt.Topics {
+			body += fmt.Sprintf("- [[%s]]\n", t)
+		}
+		body += "\n_由概念发现阶段自动生成_"
+
+		outputs = append(outputs, OutputFile{
+			Path:    cpt.Slug + ".md",
+			Content: body,
+		})
+	}
+	return outputs
+}
+
+// ========== P3: Quality Review ==========
+
+func (c *Compiler) qualityReview(task *TaskState, topics []TopicInfo, articles []OutputFile) []OutputFile {
+	if len(articles) < 2 {
+		return articles
+	}
+
+	task.AppendLog("[REVIEW] Performing quality review...\n")
+
+	// Count links in each article
+	totalLinks := 0
+	var orphans []string
+	articleNames := make(map[string]bool)
+	for _, a := range articles {
+		name := strings.TrimSuffix(a.Path, ".md")
+		articleNames[name] = true
+	}
+
+	for _, a := range articles {
+		links := countWikiLinks(a.Content)
+		totalLinks += links
+		// Check if this article has any outward links
+		name := strings.TrimSuffix(a.Path, ".md")
+		hasOutbound := false
+		for _, other := range articles {
+			if other.Path == a.Path {
+				continue
+			}
+			otherName := strings.TrimSuffix(other.Path, ".md")
+			if strings.Contains(a.Content, "[["+otherName+"]]") {
+				hasOutbound = true
+				break
+			}
+		}
+		if !hasOutbound && len(articles) > 1 {
+			orphans = append(orphans, name)
+		}
+	}
+
+	lowCoverage := 0
+	for _, a := range articles {
+		if strings.Contains(a.Content, "[coverage: low]") || strings.Contains(a.Content, "[coverage:low]") {
+			lowCoverage++
+		}
+	}
+
+	issues := []string{}
+	if len(orphans) > 0 {
+		issues = append(issues, fmt.Sprintf("孤立文章(无出站链接): %s", strings.Join(orphans, ", ")))
+	}
+	if lowCoverage > 0 {
+		issues = append(issues, fmt.Sprintf("%d 篇文章标记了低覆盖度", lowCoverage))
+	}
+	if totalLinks == 0 {
+		issues = append(issues, "全篇无 [[wiki链接]]")
+	}
+
+	if len(issues) > 0 {
+		task.AppendLog("[REVIEW] Issues found:\n")
+		for _, issue := range issues {
+			task.AppendLog("  ⚠ %s\n", issue)
+		}
+
+		// Try to fix orphans by adding links
+		if len(orphans) > 0 {
+			task.AppendLog("[REVIEW] Attempting to add missing links...\n")
+			articles = c.fixOrphans(task, articles, orphans, topics)
+		}
+	} else {
+		task.AppendLog("[REVIEW] All checks passed\n")
+	}
+
+	return articles
+}
+
+func (c *Compiler) fixOrphans(task *TaskState, articles []OutputFile, orphans []string, topics []TopicInfo) []OutputFile {
+	orphanSet := make(map[string]bool)
+	for _, o := range orphans {
+		orphanSet[o] = true
+	}
+
+	for i, a := range articles {
+		name := strings.TrimSuffix(a.Path, ".md")
+		if !orphanSet[name] {
+			continue
+		}
+
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("文章「%s」缺少指向其他相关文章的 [[链接]]。\n\n", name))
+		b.WriteString("以下是可引用的其他文章列表:\n")
+		for _, t := range topics {
+			if t.Name != name {
+				b.WriteString(fmt.Sprintf("- [[%s]]: %s\n", t.Name, t.Description))
+			}
+		}
+		b.WriteString("\n文章当前内容:\n```\n")
+		if len(a.Content) > 2000 {
+			b.WriteString(a.Content[:2000] + "...\n")
+		} else {
+			b.WriteString(a.Content)
+		}
+		b.WriteString("\n```\n")
+		b.WriteString("\n请在原文适当位置插入2-3个[[链接]]。只输出修改后的完整文章内容。")
+
+		systemMsg := "你是一个知识库编辑。在文章正文中找到可以交叉引用的位置，插入[[链接]]。保持原文不变，只增加链接。"
+
+		content, err := c.llm.ChatRaw(context.Background(), systemMsg, b.String())
+		if err != nil {
+			task.AppendLog("[REVIEW] Fix failed for '%s': %v\n", name, err)
+			continue
+		}
+		articles[i].Content = content
+		task.AppendLog("[REVIEW] Fixed links for '%s'\n", name)
+	}
+	return articles
+}
+
+func countWikiLinks(content string) int {
+	count := 0
+	for i := 0; i < len(content)-2; i++ {
+		if content[i] == '[' && i+1 < len(content) && content[i+1] == '[' {
+			count++
+			i++
+		}
+	}
+	return count
+}
+
+// ========== INDEX.md + log.md ==========
+
 func (c *Compiler) generateIndex(task *TaskState, topics []TopicInfo, fileCount int, outputDir string) OutputFile {
 	today := time.Now().Format("2006-01-02")
-
 	var b strings.Builder
 	b.WriteString("# Knowledge Base\n\n")
 	b.WriteString(fmt.Sprintf("最后编译: %s\n", today))
 	b.WriteString(fmt.Sprintf("主题数: %d | 源文件: %d\n\n", len(topics), fileCount))
-	b.WriteString("## 主题\n\n")
-	b.WriteString("| 主题 | 来源 |\n")
-	b.WriteString("|------|------|\n")
+	b.WriteString("## 主题\n\n| 主题 | 说明 | 来源 |\n")
+	b.WriteString("|------|------|------|\n")
 	for _, t := range topics {
-		b.WriteString(fmt.Sprintf("| [[%s]] | %d |\n", t.Name, len(t.SourcePaths)))
+		b.WriteString(fmt.Sprintf("| [[%s]] | %s | %d |\n", t.Name, t.Description, len(t.SourcePaths)))
 	}
 	b.WriteString("\n## 最近变更\n")
 	b.WriteString(fmt.Sprintf("- %s: 知识编译\n", today))
-
-	return OutputFile{
-		Path:    "INDEX.md",
-		Content: b.String(),
-	}
+	return OutputFile{Path: "INDEX.md", Content: b.String()}
 }
 
-// generateLog creates log.md.
 func (c *Compiler) generateLog(task *TaskState, topics []TopicInfo, fileCount int, outputDir string) OutputFile {
 	today := time.Now().Format("2006-01-02")
 	var names []string
 	for _, t := range topics {
 		names = append(names, t.Name)
 	}
-
 	content := fmt.Sprintf("## %s\n\n**创建的主题:** %s\n**处理的源文件:** %d\n",
 		today, strings.Join(names, ", "), fileCount)
-
-	return OutputFile{
-		Path:    "log.md",
-		Content: content,
-	}
+	return OutputFile{Path: "log.md", Content: content}
 }
 
-// ========== File & Skills Loading (unchanged) ==========
+// ========== File & Skills Loading ==========
 
 func (c *Compiler) loadWorkspaceFiles(workspaceID string) ([]FileNode, error) {
 	tree, err := c.fileSvc.GetCurrentTree(workspaceID)
@@ -458,18 +798,12 @@ func walkTree(node *entity.TreeNode, parentPath string, nodes *[]FileNode, svc *
 			if content == "" {
 				content = "[empty]"
 			}
-			*nodes = append(*nodes, FileNode{
-				ID:      child.ID,
-				Name:    child.Name,
-				Path:    relPath,
-				Content: content,
-			})
+			*nodes = append(*nodes, FileNode{ID: child.ID, Name: child.Name, Path: relPath, Content: content})
 		}
 	}
 }
 
 func (c *Compiler) loadSkills(workspaceID string, skillRefs []string) ([]SkillDef, error) {
-	// Try workspace skills folder first
 	tree, err := c.fileSvc.GetCurrentTree(workspaceID)
 	if err == nil && tree != nil {
 		skillsFolderID := findFolderNamed(tree, ".knowledgebase")
@@ -486,7 +820,6 @@ func (c *Compiler) loadSkills(workspaceID string, skillRefs []string) ([]SkillDe
 			}
 		}
 	}
-	// Fallback to filesystem
 	return loadLocalSkills()
 }
 
@@ -552,7 +885,7 @@ func loadLocalSkills() ([]SkillDef, error) {
 	return nil, nil
 }
 
-// ========== Output Writing & Commit (unchanged) ==========
+// ========== Output Writing & Commit ==========
 
 func (c *Compiler) writeOutputFiles(task *TaskState, input *CompileInput, outputDir string, files []OutputFile) ([]string, string, error) {
 	srcWorkspace, err := c.fileSvc.GetFileByID(input.WorkspaceID)
@@ -567,14 +900,14 @@ func (c *Compiler) writeOutputFiles(task *TaskState, input *CompileInput, output
 	outputName := srcWorkspace.Name + "-" + outputDir
 	outputWS, err := c.fileSvc.CreateFolder(input.TenantID, rootFolder.ID, outputName, input.Actor)
 	if err != nil {
-		task.AppendLog("[OUTPUT] Folder '%s' may already exist: %v\n", outputName, err)
+		task.AppendLog("[OUTPUT] Folder '%s' may already exist\n", outputName)
 		rootTree, _ := c.fileSvc.GetCurrentTree(rootFolder.ID)
 		outputWS = findChildFolderByName(rootTree, outputName)
 	}
 	if outputWS == nil {
 		return nil, "", fmt.Errorf("cannot create output workspace '%s'", outputName)
 	}
-	task.AppendLog("[OUTPUT] Workspace: '%s' (id=%s)\n", outputName, outputWS.ID)
+	task.AppendLog("[OUTPUT] Workspace: '%s'\n", outputName)
 
 	var created []string
 	for _, f := range files {
@@ -614,6 +947,3 @@ func findChildFolderByName(node *entity.TreeNode, name string) *entity.File {
 	}
 	return nil
 }
-
-
-

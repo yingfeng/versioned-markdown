@@ -231,7 +231,7 @@ export default function WorkspacePage() {
         }
       }
       collect(folderNode)
-      console.log('[Graph] found', allFiles.length, 'markdown files')
+      console.log('[Graph] found', allFiles.length, 'markdown files:', allFiles.map(f => f.name))
 
       if (allFiles.length === 0) {
         console.log('[Graph] no markdown files, setting empty graph')
@@ -254,6 +254,8 @@ export default function WorkspacePage() {
 
       const result = await buildGraph(fileContents)
       console.log('[Graph] buildGraph result:', result.nodes.length, 'nodes,', result.edges.length, 'edges')
+      console.log('[Graph] nodes:', result.nodes.map(n => n.id + '(' + n.kind + ')'))
+      console.log('[Graph] edges:', result.edges.map(e => e.source + '→' + e.target))
       setGraphNodes(result.nodes)
       setGraphEdges(result.edges)
     } catch (e: any) {
