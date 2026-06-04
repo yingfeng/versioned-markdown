@@ -126,7 +126,7 @@ func (t *TaskState) GetLog() string {
 }
 
 // Compiler is the knowledge compilation agent.
-// P0+P1+P2: Extended with BranchBudget, ModeDecider, ToolRegistry.
+// Compiler is the knowledge compilation agent.
 type Compiler struct {
 	fileSvc   *service.FileService
 	llm       *LLMClient
@@ -139,12 +139,10 @@ type Compiler struct {
 	budget *BranchBudgetTracker
 	// P1: L1 mode decision engine
 	modeDec *ModeDecider
-	// P0: Tool registry for extensible stages
-	registry *ToolRegistry
 }
 
 func NewCompiler(fileSvc *service.FileService, llm *LLMClient, rdb *redis.Client) *Compiler {
-	c := &Compiler{
+	return &Compiler{
 		fileSvc:  fileSvc,
 		llm:      llm,
 		rdb:      rdb,
@@ -152,56 +150,7 @@ func NewCompiler(fileSvc *service.FileService, llm *LLMClient, rdb *redis.Client
 		entityID: entity.NewID,
 		budget:   NewBranchBudgetTracker(),
 		modeDec:  NewModeDecider(),
-		registry: NewToolRegistry(),
 	}
-	// P0: Register pipeline stages as tools
-	c.registerTools()
-	return c
-}
-
-// P0: Register all pipeline stages as tools for extensibility.
-func (c *Compiler) registerTools() {
-	// Key stages are registered for introspection and future MCP integration.
-	// The pipeline still calls them directly, but they're also discoverable via registry.
-	loadTool := NewStageTool(ToolLoad, "Load workspace files and skills",
-		func(ctx context.Context, deps *ToolDeps) (any, error) {
-			files, skills := c.loadPhase(deps.Task, deps.Input)
-			return map[string]any{"files": files, "skills": skills}, nil
-		})
-	c.registry.Register(loadTool)
-
-	scanTool := NewStageTool(ToolScan, "Discover knowledge topics from files",
-		func(ctx context.Context, deps *ToolDeps) (any, error) {
-			topics := c.scanPhase(deps.Task, deps.Files, deps.Skills, deps.Input.Instructions)
-			return map[string]any{"topics": topics}, nil
-		})
-	c.registry.Register(scanTool)
-
-	compileTool := NewStageTool(ToolCompile, "Compile knowledge articles per topic",
-		func(ctx context.Context, deps *ToolDeps) (any, error) {
-			return nil, nil // handled in runCompile with per-topic iteration
-		})
-	c.registry.Register(compileTool)
-
-	consistencyTool := NewStageTool(ToolConsistency, "Cross-article consistency review",
-		func(ctx context.Context, deps *ToolDeps) (any, error) {
-			outputs := c.consistencyReview(deps.Task, deps.Output)
-			return map[string]any{"outputs": outputs}, nil
-		})
-	c.registry.Register(consistencyTool)
-
-	conceptTool := NewStageTool(ToolConcept, "Cross-topic concept discovery",
-		func(ctx context.Context, deps *ToolDeps) (any, error) {
-			return nil, nil // handled separately due to checkpoint integration
-		})
-	c.registry.Register(conceptTool)
-
-	qualityTool := NewStageTool(ToolQuality, "Quality review and orphan link fixing",
-		func(ctx context.Context, deps *ToolDeps) (any, error) {
-			outputs := c.qualityReview(deps.Task, deps.Topics, deps.Output)
-			return map[string]any{"outputs": outputs}, nil
-		})
-	c.registry.Register(qualityTool)
 }
 
 func (c *Compiler) StartCompile(ctx context.Context, input *CompileInput) (*TaskState, error) {
