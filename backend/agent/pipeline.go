@@ -261,7 +261,7 @@ func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 		task.AppendLog("[CP] Restored %d compiled articles\n", len(allOutputs))
 	}
 
-	// Compile: sequential per-domain, parallel via goroutine pool for multiple domains
+	// Compile: parallel via goroutine pool for topics in single-domain or domains in multi-domain
 	type domainResult struct {
 		name     string
 		articles []OutputFile
@@ -269,27 +269,69 @@ func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 	}
 
 	if len(domains) <= 1 {
-		// Single domain: sequential compile (existing behavior)
+		// Single domain: parallel compile per topic sub-agent
 		domain := domains[0]
 		var domainTopics []TopicInfo
 		if len(domain.Files) > 0 {
-			// Scan within domain files
 			c.extractKeywords(task, domain.Files)
 			domainTopics = c.scanPhase(task, domain.Files, skills, input.Instructions)
 		}
 		if len(domainTopics) == 0 && len(domain.Files) > 0 {
 			domainTopics = c.fallbackTopics(domain.Files)
 		}
-		task.AppendLog("[COMPILE] %d topics in domain '%s'\n", len(domainTopics), domain.Name)
+		task.AppendLog("[COMPILE] %d topics in domain '%s' (parallel)\n", len(domainTopics), domain.Name)
+
+		const maxParallelTopics = 2
+		sem := make(chan struct{}, maxParallelTopics)
+		type topicResult struct {
+			index   int
+			article *OutputFile
+		}
+		resultCh := make(chan topicResult, len(domainTopics))
+		var wg sync.WaitGroup
 
 		for i, topic := range domainTopics {
 			if i < len(allOutputs) {
 				continue
 			}
-			c.compileSingleTopic(task, &allOutputs, topic, domainTopics, domain.Files, outputDir, cp, compileStart, i, len(domainTopics), skills, domain.Name)
+			wg.Add(1)
+			sem <- struct{}{}
+			go func(idx int, tp TopicInfo) {
+				defer func() { wg.Done(); <-sem }()
+				c.budget.RecordTopicStart(tp.Name)
+				c.budget.ResetForNewTopic(tp.Name)
+				tStart := time.Now()
+				article := c.compilePhase(task, tp, domain.Files, domainTopics, nil, outputDir, skills, domain.Name)
+				task.AppendLog("[COMPILE] Topic %d/%d: '%s' (%v)\n", idx+1, len(domainTopics), tp.Name, time.Since(tStart).Round(time.Second))
+				if article != nil {
+					resultCh <- topicResult{index: idx, article: article}
+				} else {
+					resultCh <- topicResult{index: idx, article: nil}
+				}
+			}(i, topic)
 		}
 
-		// Single domain: append mapping-notes
+		go func() {
+			wg.Wait()
+			close(resultCh)
+		}()
+
+		// Collect results preserving order
+		type orderedResult struct {
+			article *OutputFile
+			ready   bool
+		}
+		pending := make([]orderedResult, len(domainTopics))
+		for res := range resultCh {
+			pending[res.index].article = res.article
+			pending[res.index].ready = true
+		}
+		for _, p := range pending {
+			if p.ready && p.article != nil {
+				allOutputs = append(allOutputs, *p.article)
+			}
+		}
+
 		if len(domainTopics) > 0 {
 			allOutputs = append(allOutputs, generateMappingNote(domain.Name, domainTopics, len(domain.Files)))
 		}
@@ -304,7 +346,6 @@ func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 			go func(dg DomainGroup) {
 				defer func() { <-sem }()
 
-				// Each domain sub-agent: scan + compile
 				c.extractKeywords(task, dg.Files)
 				domainTopics := c.scanPhase(task, dg.Files, skills, input.Instructions)
 				if len(domainTopics) == 0 && len(dg.Files) > 0 {
@@ -319,7 +360,6 @@ func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 					}
 				}
 
-				// Append mapping-notes for this domain
 				if len(domainTopics) > 0 {
 					outputs = append(outputs, generateMappingNote(dg.Name, domainTopics, len(dg.Files)))
 				}
@@ -341,6 +381,9 @@ func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 			}
 		}
 	}
+
+	// Clear unused compileStart ref
+	_ = compileStart
 
 	// Consistency review (now with domain-aware backlinks)
 	if len(allOutputs) > 0 {
