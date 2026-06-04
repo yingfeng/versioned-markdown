@@ -23,6 +23,7 @@ type AgentConfig struct {
 	SkillContent string // loaded SKILL.md content
 	Instructions string // user-provided instructions
 	OutputDir    string
+	CP           *CheckpointManager // optional, for checkpoint resume
 }
 
 // AgentResult holds the final output of an agent run.
@@ -33,7 +34,8 @@ type AgentResult struct {
 }
 
 // RunAgentLoop executes the agent with the given config.
-// The LLM reads SKILL.md, then autonomously calls tools.
+// Supports checkpoint resume: if cfg.CP is set and a checkpoint exists,
+// restores messages and state from the last saved turn.
 func RunAgentLoop(ctx context.Context, cfg *AgentConfig) (*AgentResult, error) {
 	start := time.Now()
 
@@ -55,13 +57,7 @@ func RunAgentLoop(ctx context.Context, cfg *AgentConfig) (*AgentResult, error) {
 		}
 	}
 
-	// 4. Reset global state
-	globalState = &AgentState{
-		Input: &CompileInput{WorkspaceID: cfg.WorkspaceID},
-		Task:  &TaskState{ID: "agent", Status: "running", Log: ""},
-	}
-
-	// 5. Agent Loop: LLM decides which tool to call next
+	// 4. Try checkpoint resume
 	maxTurns := 30
 	turnCount := 0
 	autoExecCount := 0
@@ -71,9 +67,36 @@ func RunAgentLoop(ctx context.Context, cfg *AgentConfig) (*AgentResult, error) {
 		userContent = "请按照上述工作流程，逐步执行知识编译任务。"
 	}
 
-	messages := []*schema.Message{
-		schema.SystemMessage(systemPrompt),
-		schema.UserMessage(userContent),
+	var messages []*schema.Message
+
+	if cfg.CP != nil {
+		if restoredTurn, restoredMsgs, restoredState, err := cfg.CP.LoadAgentCheckpoint(); err == nil && restoredState != nil {
+			turnCount = restoredTurn
+			messages = restoredMsgs
+			globalState = restoredState
+			globalState.appendLog("[CP] Resumed from turn %d\n", restoredTurn)
+		}
+	}
+
+	if messages == nil {
+		// No checkpoint restored — start fresh
+		globalState = &AgentState{
+			Input: &CompileInput{WorkspaceID: cfg.WorkspaceID},
+			Task:  &TaskState{ID: "agent", Status: "running", Log: ""},
+		}
+		messages = []*schema.Message{
+			schema.SystemMessage(systemPrompt),
+			schema.UserMessage(userContent),
+		}
+	}
+
+	// 5. Save checkpoint function
+	saveCP := func() {
+		if cfg.CP != nil {
+			if err := cfg.CP.SaveAgentCheckpoint(turnCount, messages, globalState); err != nil {
+				globalState.appendLog("[CP] Save error: %v\n", err)
+			}
+		}
 	}
 
 	for turnCount < maxTurns {
@@ -102,6 +125,9 @@ func RunAgentLoop(ctx context.Context, cfg *AgentConfig) (*AgentResult, error) {
 				messages = append(messages, toolMsg)
 			}
 
+			// Save checkpoint after each tool execution cycle
+			saveCP()
+
 			if isTaskComplete(globalState) {
 				globalState.appendLog("[DONE] Task appears complete\n")
 				break
@@ -124,13 +150,15 @@ func RunAgentLoop(ctx context.Context, cfg *AgentConfig) (*AgentResult, error) {
 				result := executeToolCall(agentTools, toolName, argsJSON)
 				globalState.appendLog("  <- auto result: %s\n", truncate(result, 100))
 
-				// Inject auto-execution result without LLM decision round
 				messages = append(messages, schema.ToolMessage(result, "auto_"+toolName))
+
+				// Save checkpoint after auto-execution
+				saveCP()
 
 				if isTaskComplete(globalState) {
 					break
 				}
-				continue // skip context compression below, go to next LLM turn
+				continue
 			}
 
 			// Guard: if no progress after several text-only turns, stop
@@ -142,10 +170,18 @@ func RunAgentLoop(ctx context.Context, cfg *AgentConfig) (*AgentResult, error) {
 
 		// 6. Context compression: prevent unbounded message growth
 		messages = compressContext(messages, 24)
+
+		// Save checkpoint after compression (reduced size)
+		saveCP()
 	}
 
 	elapsed := time.Since(start)
 	globalState.appendLog("[TASK] Completed in %v (%d turns)\n", elapsed, turnCount)
+
+	// Delete checkpoint on successful completion
+	if cfg.CP != nil {
+		cfg.CP.Delete()
+	}
 
 	// Collect log from global state
 	var logText string
@@ -335,12 +371,15 @@ func (c *Compiler) StartAgentCompile(ctx context.Context, input *CompileInput) (
 			skillContent += fmt.Sprintf("### Skill: %s\n\n%s\n\n", s.Name, s.Content)
 		}
 
+			cp := NewCheckpointManager(c.rdb, taskID)
+
 		cfg := &AgentConfig{
 			LLM:          c.llm,
 			WorkspaceID:  input.WorkspaceID,
 			SkillContent: skillContent,
 			Instructions: input.Instructions,
 			OutputDir:    input.OutputDir,
+			CP:           cp,
 		}
 
 		result, err := RunAgentLoop(ctx, cfg)
