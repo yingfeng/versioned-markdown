@@ -104,7 +104,7 @@ func (t *CompileTool) InvokableRun(ctx context.Context, argumentsInJSON string, 
 	s := globalState
 	for i := range s.Topics {
 		if s.Topics[i].Name == args.TopicName {
-			article := t.compiler.compilePhase(t.task, s.Topics[i], s.Files, s.Topics, s.Outputs, "synthesis", s.Skills, "wiki")
+			article := t.compiler.compilePhase(t.task, s.Topics[i], s.Files, s.Topics, s.Outputs, "synthesis", s.Skills, "wiki", "")
 			if article != nil {
 				s.Outputs = append(s.Outputs, *article)
 				return fmt.Sprintf("已编译: %s (%d chars)", article.Path, len(article.Content)), nil

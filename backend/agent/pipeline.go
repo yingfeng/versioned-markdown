@@ -302,7 +302,7 @@ func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 				c.budget.RecordTopicStart(tp.Name)
 				c.budget.ResetForNewTopic(tp.Name)
 				tStart := time.Now()
-				article := c.compilePhase(task, tp, domain.Files, domainTopics, nil, outputDir, skills, domain.Name)
+				article := c.compilePhase(task, tp, domain.Files, domainTopics, nil, outputDir, skills, domain.Name, "")
 				task.AppendLog("[COMPILE] Topic %d/%d: '%s' (%v)\n", idx+1, len(domainTopics), tp.Name, time.Since(tStart).Round(time.Second))
 				if article != nil {
 					resultCh <- topicResult{index: idx, article: article}
@@ -355,7 +355,7 @@ func (c *Compiler) runCompile(task *TaskState, input *CompileInput) {
 
 				var outputs []OutputFile
 				for _, t := range domainTopics {
-					article := c.compilePhase(task, t, dg.Files, domainTopics, nil, outputDir, skills, dg.Name)
+					article := c.compilePhase(task, t, dg.Files, domainTopics, nil, outputDir, skills, dg.Name, "")
 					if article != nil {
 						outputs = append(outputs, *article)
 					}
@@ -438,7 +438,7 @@ func (c *Compiler) compileSingleTopic(task *TaskState, allOutputs *[]OutputFile,
 	c.budget.ResetForNewTopic(topic.Name)
 
 	tStart := time.Now()
-	article := c.compilePhase(task, topic, files, topics, *allOutputs, outputDir, skills, domain)
+	article := c.compilePhase(task, topic, files, topics, *allOutputs, outputDir, skills, domain, "")
 	elapsed := time.Since(tStart).Round(time.Second)
 
 	if article != nil {
@@ -798,11 +798,55 @@ func (c *Compiler) fallbackTopics(files []FileNode) []TopicInfo {
 
 // ========== Claude Code-style Compile: Understand → Read → Write → Verify ==========
 
-func (c *Compiler) compilePhase(task *TaskState, topic TopicInfo, allFiles []FileNode, allTopics []TopicInfo, compiled []OutputFile, outputDir string, skills []SkillDef, domain string) *OutputFile {
+func (c *Compiler) compilePhase(task *TaskState, topic TopicInfo, allFiles []FileNode, allTopics []TopicInfo, compiled []OutputFile, outputDir string, skills []SkillDef, domain string, existingContent string) *OutputFile {
 	task.AppendLog("[COMPILE] Topic '%s' (%d sources, domain: %s)...\n", topic.Name, len(topic.SourcePaths), domain)
 
 	// P2: Dynamic compression — build context with volume-aware compression
 	context := c.buildCompileContext(topic, allTopics, compiled, skills, domain)
+
+	// Atomic-style: if existing content available, use section ops for incremental update
+	if existingContent != "" && sectionCount(existingContent) > 0 {
+		task.AppendLog("[SECTION_OPS] Existing article found, using incremental update\n")
+
+		// Collect source files for this topic
+		topicPaths := make(map[string]bool)
+		for _, p := range topic.SourcePaths {
+			topicPaths[p] = true
+		}
+		var newSources []FileNode
+		for _, f := range allFiles {
+			if topicPaths[f.Path] {
+				newSources = append(newSources, f)
+			}
+		}
+
+		ops := c.getSectionOps(task, existingContent, topic.Name, newSources)
+		hasChanges := false
+		for _, op := range ops {
+			if op.Op != SectionOpNoChange {
+				hasChanges = true
+				break
+			}
+		}
+
+		if !hasChanges {
+			task.AppendLog("[SECTION_OPS] No changes needed\n")
+			article := addFrontMatter(existingContent, domain)
+			outputPath := outputPathForDomain(domain, topic.Name)
+			return &OutputFile{Path: outputPath, Content: article, Score: 1.0}
+		}
+
+		article := applySectionOps(existingContent, ops)
+		task.AppendLog("[SECTION_OPS] Applied %d operations\n", len(ops))
+		_ = context
+		// Skip rounds 1-4, go straight to quality check
+		_ = c.extractSessionNote(article, topic.Name)
+		score := scoreArticle(article, topic, allTopics)
+		task.AppendLog("[SCORE] '%s' (incremental): %.2f/1.00\n", topic.Name, score)
+		article = addFrontMatter(article, domain)
+		outputPath := outputPathForDomain(domain, topic.Name)
+		return &OutputFile{Path: outputPath, Content: article, Score: score}
+	}
 
 	// Collect the topic's source files
 	var relevantFiles []FileNode

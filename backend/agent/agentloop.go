@@ -264,7 +264,7 @@ func createAgentTools(compiler *Compiler) []tool.InvokableTool {
 				for i := range globalState.Topics {
 					if globalState.Topics[i].Name == args.TopicName {
 						article := compiler.compilePhase(globalState.Task, globalState.Topics[i],
-							globalState.Files, globalState.Topics, globalState.Outputs, "synthesis", globalState.Skills, "wiki")
+							globalState.Files, globalState.Topics, globalState.Outputs, "synthesis", globalState.Skills, "wiki", "")
 						if article != nil {
 							globalState.Outputs = append(globalState.Outputs, *article)
 							return fmt.Sprintf("已编译: %s (%d chars)", article.Path, len(article.Content)), nil
