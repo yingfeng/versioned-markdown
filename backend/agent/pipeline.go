@@ -37,8 +37,9 @@ type CompileResult struct {
 
 // OutputFile represents a single output file to create.
 type OutputFile struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	Path    string  `json:"path"`
+	Content string  `json:"content"`
+	Score   float64 `json:"score,omitempty"` // quality score 0.0-1.0, computed after compilation
 }
 
 // LLMResult contains the structured output from a single LLM call.
@@ -935,12 +936,103 @@ REASON: 简要说明为什么需要这些文件`
 	// P0: Session Note — extract structured note for future reference
 	_ = c.extractSessionNote(article, topic.Name)
 
+	// Compute quality score
+	score := scoreArticle(article, topic, allTopics)
+	task.AppendLog("[SCORE] '%s': %.2f/1.00\n", topic.Name, score)
+
+	// Low-quality: recompile if budget allows
+	if score < 0.5 && c.budget.CheckRewriteBudget(topic.Name) {
+		c.budget.RecordRewrite(topic.Name)
+		task.AppendLog("[SCORE] Low quality (%.2f), recompiling...\n", score)
+		reworkPrompt := "你的文章质量评分较低。请重点改进：\n"
+		reworkPrompt += "- 确保每个 claim 有 [source: filename.md] 溯源\n"
+		reworkPrompt += "- 增加 [[OtherArticle]] 交叉引用\n"
+		reworkPrompt += "- 确保有 ## 概要 和 ## 资料来源 章节\n"
+		reworkPrompt += "- 增加 [coverage: high/medium/low] 标签\n\n"
+		reworkPrompt += "重新输出完整的文章。\n---\n" + truncate(article, 8000)
+
+		rework := c.chatWithRetry(task, "", reworkPrompt)
+		if rework != "" {
+			rework = stripJSONFence(rework)
+			if len(rework) > len(article)/2 {
+				article = rework
+				score2 := scoreArticle(article, topic, allTopics)
+				task.AppendLog("[SCORE] Recompile: %.2f/1.00 → %.2f/1.00\n", score, score2)
+				score = score2
+			}
+		}
+	}
+
 	// Add front-matter with last_verified date
 	article = addFrontMatter(article, domain)
 
 	// Output path: domains/{domain}/{topic}.md or {topic}.md for wiki
 	outputPath := outputPathForDomain(domain, topic.Name)
-	return &OutputFile{Path: outputPath, Content: article}
+	return &OutputFile{Path: outputPath, Content: article, Score: score}
+}
+
+// scoreArticle computes a numeric quality score (0.0–1.0) for a compiled article.
+// Modeled after sage-wiki's 3-dimension quality scoring.
+func scoreArticle(article string, topic TopicInfo, allTopics []TopicInfo) float64 {
+	trimmed := strings.TrimSpace(article)
+	if trimmed == "" {
+		return 0
+	}
+
+	// Dimension 1: Source citation coverage (0-0.25)
+	sourceScore := 0.0
+	sourceCount := strings.Count(article, "[source:")
+	if sourceCount >= 3 {
+		sourceScore = 0.25
+	} else if sourceCount >= 1 {
+		sourceScore = 0.25 * float64(sourceCount) / 3.0
+	}
+
+	// Dimension 2: Cross-reference count (0-0.25)
+	linkCount := countWikiLinks(article)
+	linkScore := 0.0
+	if linkCount >= 3 {
+		linkScore = 0.25
+	} else if linkCount >= 1 {
+		linkScore = 0.25 * float64(linkCount) / 3.0
+	}
+
+	// Dimension 3: Coverage tag completeness (0-0.2)
+	coverageScore := 0.0
+	coverageTags := strings.Count(article, "[coverage:")
+	if coverageTags >= 2 {
+		coverageScore = 0.2
+	} else if coverageTags >= 1 {
+		coverageScore = 0.1
+	}
+
+	// Dimension 4: Content length adequacy (0-0.15)
+	lenScore := 0.0
+	charCount := len(trimmed)
+	if charCount >= 1000 {
+		lenScore = 0.15
+	} else if charCount >= 500 {
+		lenScore = 0.10
+	} else if charCount >= 200 {
+		lenScore = 0.05
+	}
+
+	// Dimension 5: Section completeness (0-0.15)
+	secScore := 0.0
+	hasSummary := strings.Contains(article, "## 概要") || strings.Contains(article, "## Summary")
+	hasSources := strings.Contains(article, "## 资料来源") || strings.Contains(article, "## Sources")
+	if hasSummary {
+		secScore += 0.075
+	}
+	if hasSources {
+		secScore += 0.075
+	}
+
+	total := sourceScore + linkScore + coverageScore + lenScore + secScore
+	if total > 1.0 {
+		total = 1.0
+	}
+	return total
 }
 
 // P1: Mode-aware Quality Gate — checks article for minimum quality standards.
